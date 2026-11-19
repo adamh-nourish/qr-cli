@@ -82,15 +82,60 @@ fn stdin_and_files_encode_like_the_argument() {
     assert_eq!(from_arg, from_stdin);
     assert_eq!(from_arg, from_dash);
 
-    let dir = std::env::temp_dir().join(format!("qr-cli-it-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("payload.txt");
+    let from_dash_file = stdout_of(qr().args(["-i", "-"]).write_stdin("hello\n"));
+    assert_eq!(from_arg, from_dash_file);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payload.txt");
     std::fs::write(&path, "hello\n").unwrap();
     let from_file = stdout_of(qr().arg("-i").arg(&path));
     let kept = stdout_of(qr().arg("--keep-newline").arg("-i").arg(&path));
-    std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(from_arg, from_file);
     assert_ne!(from_arg, kept);
+}
+
+#[test]
+fn unquoted_text_is_an_extra_argument_with_a_quoting_hint() {
+    for args in [&["hello", "world"][..], &["--", "hello", "world"]] {
+        qr().args(args)
+            .assert()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(
+                "error: unexpected extra argument 'world'\n  \
+                 hint: quote text that contains spaces: qr 'hello world'\n",
+            );
+    }
+}
+
+#[test]
+fn closed_stdout_exits_4() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    // `qr -` blocks on stdin, so the reading end of its stdout can be closed
+    // before it writes anything. The write then fails with a broken pipe
+    // (Rust ignores SIGPIPE), which must be an I/O error, not a panic.
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_qr"))
+        .arg("-")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"hello\n").unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.starts_with("error: cannot write output: "),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -145,9 +190,10 @@ fn missing_file_exits_4() {
     qr().args(["-i", "definitely/missing.txt"])
         .assert()
         .code(4)
-        .stderr(predicate::str::starts_with(
-            "error: cannot read 'definitely/missing.txt': ",
-        ));
+        .stderr(
+            "error: cannot read 'definitely/missing.txt': no such file or directory\n  \
+             hint: check the path passed to -i\n",
+        );
 }
 
 #[test]

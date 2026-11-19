@@ -160,7 +160,7 @@ fn unwritable_stdout_is_an_io_error() {
     assert_eq!(status, ExitStatus::Io);
     assert_eq!(
         String::from_utf8(err).unwrap(),
-        "error: cannot write output: pipe closed\n"
+        "error: cannot write output: the pipe was closed\n"
     );
 
     for args in [
@@ -211,6 +211,10 @@ fn cli_default_margin_matches_the_core_quiet_zone() {
     assert_eq!(
         usize::from(cli.generate.margin),
         qr_core::render::DEFAULT_MARGIN
+    );
+    assert_eq!(
+        usize::from(crate::cli::MAX_MARGIN),
+        qr_core::render::MAX_MARGIN
     );
 }
 
@@ -389,11 +393,93 @@ fn narrow_terminals_get_a_width_warning() {
             .err
             .contains("columns wide")
     );
+    // Piped output never warns, whatever the terminal width.
+    let piped_narrow = Env {
+        stdout_is_tty: false,
+        ..narrow
+    };
+    assert!(
+        !run_with(&["qr", "-f", "ascii", "x"], b"", piped_narrow)
+            .err
+            .contains("columns wide")
+    );
+}
+
+#[test]
+fn every_text_format_on_a_terminal_gets_the_width_warning() {
+    let narrow = Env {
+        terminal_width: Some(40),
+        ..terminal()
+    };
+    // ASCII uses two columns per module: 21 + 2 * 4 = 29 modules, 58 columns.
+    let o = run_with(&["qr", "-f", "ascii", "x"], b"", narrow);
+    assert_eq!(o.status, ExitStatus::Success);
+    assert!(
+        o.err
+            .contains("the code is 58 columns wide but the terminal has 40"),
+        "{}",
+        o.err
+    );
+    assert!(
+        o.err.contains(": widen the terminal, use -f text"),
+        "{}",
+        o.err
+    );
+    assert!(!o.err.contains("--margin"), "{}", o.err);
+
+    // Plain text fits in 40 columns, but not in 20.
     assert!(
         !run_with(&["qr", "-f", "text", "x"], b"", narrow)
             .err
             .contains("columns wide")
     );
+    let narrower = Env {
+        terminal_width: Some(20),
+        ..terminal()
+    };
+    let o = run_with(&["qr", "-f", "text", "x"], b"", narrower);
+    assert!(o.err.contains("the code is 29 columns wide"), "{}", o.err);
+    assert!(
+        o.err.contains(": widen the terminal or shorten the input"),
+        "{}",
+        o.err
+    );
+}
+
+#[test]
+fn unquoted_words_are_reported_as_an_extra_argument() {
+    for args in [
+        &["qr", "hello", "world"][..],
+        &["qr", "--", "hello", "world"],
+    ] {
+        let o = run_piped(args);
+        assert_eq!(o.status, ExitStatus::Usage, "{args:?}");
+        assert_eq!(
+            o.err,
+            "error: unexpected extra argument 'world'\n  \
+             hint: quote text that contains spaces: qr 'hello world'\n",
+            "{args:?}"
+        );
+        assert_eq!(o.out, "");
+    }
+
+    // The stray word is user data, so it is sanitised.
+    let o = run_piped(&["qr", "hello", "\x1b[31mred"]);
+    assert_eq!(o.status, ExitStatus::Usage);
+    assert!(o.err.contains("'\\u{1b}[31mred'"), "{}", o.err);
+    assert!(!o.err.contains('\x1b'));
+
+    // A real subcommand name keeps clap's own error.
+    for word in ["man", "completions", "help"] {
+        let o = run_piped(&["qr", "hello", word]);
+        assert_eq!(o.status, ExitStatus::Usage, "{word}");
+        assert!(
+            o.err
+                .contains(&format!("the subcommand '{word}' cannot be used")),
+            "{word}: {}",
+            o.err
+        );
+    }
 }
 
 #[test]

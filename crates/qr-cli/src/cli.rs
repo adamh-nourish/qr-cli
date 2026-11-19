@@ -12,7 +12,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use qr_core::{EcLevel, Mask, ModeChoice, Version};
 
-/// The largest `--margin` accepted, in modules.
+/// The largest `--margin` accepted, in modules. Equal to the renderer's own
+/// cap, [`qr_core::render::MAX_MARGIN`] (a test keeps them in step).
 pub const MAX_MARGIN: u16 = 100;
 
 const AFTER_HELP: &str = "\
@@ -20,7 +21,8 @@ Examples:
   qr 'https://example.com'     Show a QR code in the terminal
   echo hello | qr              Encode stdin (one trailing newline is dropped)
   qr -i payload.txt -f ascii   Encode a file as ASCII art
-  qr -- completions            Encode a word that is also a subcommand name
+  qr -- help                   Encode a word that is also a command name,
+                               such as 'help', 'man' or 'completions'
 
 Exit codes:
   0 ok, 1 internal error, 2 usage error, 3 data too long, 4 I/O error,
@@ -30,6 +32,8 @@ Exit codes:
 #[derive(Debug, Parser)]
 #[command(
     name = "qr",
+    // Fixed, so help and errors say `qr` rather than `qr.exe` on Windows.
+    bin_name = "qr",
     version,
     about,
     long_about = None,
@@ -66,12 +70,12 @@ pub enum Command {
 /// Options for generating a code.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct GenerateArgs {
-    /// Text to encode. `-` reads stdin, which is also the default when stdin
-    /// is not a terminal.
+    /// Text to encode; quote it if it contains spaces. '-' reads stdin, which
+    /// is also the default when stdin is not a terminal.
     #[arg(value_name = "TEXT")]
     pub text: Option<String>,
 
-    /// Read the data to encode from FILE (raw bytes).
+    /// Read the data to encode from FILE (raw bytes); '-' reads stdin.
     #[arg(
         short = 'i',
         long = "input",
@@ -143,7 +147,7 @@ pub enum OutputFormat {
     Terminal,
     /// Unicode half blocks with no escape sequences.
     Text,
-    /// `##` and spaces, pure ASCII.
+    /// '##' and spaces, pure ASCII.
     Ascii,
 }
 

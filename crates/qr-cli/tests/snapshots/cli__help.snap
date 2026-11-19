@@ -14,11 +14,12 @@ Commands:
 
 Arguments:
   [TEXT]
-          Text to encode. `-` reads stdin, which is also the default when stdin is not a terminal
+          Text to encode; quote it if it contains spaces. '-' reads stdin, which is also the default
+          when stdin is not a terminal
 
 Options:
   -i, --input <FILE>
-          Read the data to encode from FILE (raw bytes)
+          Read the data to encode from FILE (raw bytes); '-' reads stdin
 
   -f, --format <FORMAT>
           Output format [default: terminal when stdout is a terminal, else text]
@@ -26,7 +27,7 @@ Options:
           Possible values:
           - terminal: Unicode half blocks, forced black on white with ANSI colours
           - text:     Unicode half blocks with no escape sequences
-          - ascii:    `##` and spaces, pure ASCII
+          - ascii:    '##' and spaces, pure ASCII
 
       --ec <LEVEL>
           Error correction level: L, M, Q or H
@@ -81,7 +82,8 @@ Examples:
   qr 'https://example.com'     Show a QR code in the terminal
   echo hello | qr              Encode stdin (one trailing newline is dropped)
   qr -i payload.txt -f ascii   Encode a file as ASCII art
-  qr -- completions            Encode a word that is also a subcommand name
+  qr -- help                   Encode a word that is also a command name,
+                               such as 'help', 'man' or 'completions'
 
 Exit codes:
   0 ok, 1 internal error, 2 usage error, 3 data too long, 4 I/O error,

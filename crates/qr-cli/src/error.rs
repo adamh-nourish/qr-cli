@@ -2,7 +2,7 @@
 
 use std::io;
 
-use qr_core::{EcLevel, EncodeError};
+use qr_core::{EcLevel, EncodeError, max_chars};
 
 use crate::exit::ExitStatus;
 use crate::input::InputSource;
@@ -36,7 +36,7 @@ pub enum CliError {
     },
 
     /// Reading stdin or the input file failed.
-    #[error("cannot read {origin}: {error}")]
+    #[error("cannot read {origin}: {}", io_reason(.error))]
     ReadInput {
         /// What was being read.
         origin: InputSource,
@@ -50,7 +50,7 @@ pub enum CliError {
     Encode(#[from] EncodeError),
 
     /// Writing to standard output failed (for example, a closed pipe).
-    #[error("cannot write output: {0}")]
+    #[error("cannot write output: {}", io_reason(.0))]
     Output(#[source] io::Error),
 
     /// A bug: something that should be impossible happened.
@@ -80,8 +80,10 @@ impl CliError {
                 Some("pass TEXT, pipe data to stdin or use -i FILE (see 'qr --help')".to_owned())
             }
             Self::Encode(EncodeError::DataTooLong(e)) if e.ec_level != EcLevel::L => Some(format!(
-                "shorten the input or lower --ec (now {}; L holds the most)",
-                e.ec_level
+                "shorten the input or lower --ec (now {}; at L it holds up to {} {})",
+                e.ec_level,
+                max_chars(e.mode, e.version, EcLevel::L),
+                e.mode.unit()
             )),
             Self::InputTooLong { .. } | Self::Encode(EncodeError::DataTooLong(_)) => {
                 Some("shorten the input".to_owned())
@@ -92,9 +94,40 @@ impl CliError {
             Self::Encode(_) | Self::Internal(_) => {
                 Some("this is a bug; please report it".to_owned())
             }
+            Self::ReadInput {
+                origin: InputSource::File(_),
+                ..
+            } => Some("check the path passed to -i".to_owned()),
             Self::ReadInput { .. } | Self::Output(_) => None,
         }
     }
+}
+
+/// A lowercase description of an I/O failure.
+///
+/// The standard library's text comes from the OS ("No such file or
+/// directory (os error 2)"), which breaks the lowercase message style, so
+/// common kinds get fixed wording. Anything else keeps its own text with
+/// the first letter lowered.
+fn io_reason(error: &io::Error) -> String {
+    let fixed = match error.kind() {
+        io::ErrorKind::NotFound => "no such file or directory",
+        io::ErrorKind::PermissionDenied => "permission denied",
+        io::ErrorKind::IsADirectory => "it is a directory",
+        io::ErrorKind::BrokenPipe => "the pipe was closed",
+        io::ErrorKind::InvalidData => "the data is invalid",
+        io::ErrorKind::Interrupted => "the operation was interrupted",
+        io::ErrorKind::OutOfMemory => "out of memory",
+        io::ErrorKind::StorageFull => "no space left on the device",
+        _ => {
+            let text = error.to_string();
+            let mut chars = text.chars();
+            return chars.next().map_or_else(String::new, |first| {
+                first.to_lowercase().chain(chars).collect()
+            });
+        }
+    };
+    fixed.to_owned()
 }
 
 #[cfg(test)]
@@ -120,7 +153,7 @@ mod tests {
     fn output_error_maps_to_io_status_and_keeps_source() {
         let err = CliError::Output(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"));
         assert_eq!(err.exit_status(), ExitStatus::Io);
-        assert_eq!(err.to_string(), "cannot write output: pipe closed");
+        assert_eq!(err.to_string(), "cannot write output: the pipe was closed");
         assert!(err.source().is_some());
         assert_eq!(err.hint(), None);
     }
@@ -171,9 +204,56 @@ mod tests {
     }
 
     #[test]
+    fn io_reasons_are_lowercase() {
+        let kinds = [
+            (io::ErrorKind::NotFound, "no such file or directory"),
+            (io::ErrorKind::PermissionDenied, "permission denied"),
+            (io::ErrorKind::IsADirectory, "it is a directory"),
+            (io::ErrorKind::BrokenPipe, "the pipe was closed"),
+            (io::ErrorKind::InvalidData, "the data is invalid"),
+            (io::ErrorKind::Interrupted, "the operation was interrupted"),
+            (io::ErrorKind::OutOfMemory, "out of memory"),
+            (io::ErrorKind::StorageFull, "no space left on the device"),
+        ];
+        for (kind, text) in kinds {
+            assert_eq!(io_reason(&io::Error::new(kind, "Raw OS Text")), text);
+        }
+        assert_eq!(
+            io_reason(&io::Error::other("Device on fire")),
+            "device on fire"
+        );
+        assert_eq!(io_reason(&io::Error::other("")), "");
+        assert_eq!(
+            io_reason(&io::Error::from_raw_os_error(2)),
+            "no such file or directory"
+        );
+    }
+
+    #[test]
+    fn read_errors_hint_at_the_path_only_for_files() {
+        let file = CliError::ReadInput {
+            origin: InputSource::File("x".into()),
+            error: io::ErrorKind::NotFound.into(),
+        };
+        assert_eq!(
+            file.to_string(),
+            "cannot read 'x': no such file or directory"
+        );
+        assert_eq!(file.hint().unwrap(), "check the path passed to -i");
+        let stdin = CliError::ReadInput {
+            origin: InputSource::Stdin,
+            error: io::Error::other("x"),
+        };
+        assert_eq!(stdin.hint(), None);
+    }
+
+    #[test]
     fn data_too_long_hint_suggests_lowering_ec_only_when_possible() {
         let m = too_long(EcLevel::M).hint().unwrap();
-        assert!(m.contains("lower --ec (now M"), "{m}");
+        assert_eq!(
+            m,
+            "shorten the input or lower --ec (now M; at L it holds up to 2953 bytes)"
+        );
         assert_eq!(too_long(EcLevel::L).hint().unwrap(), "shorten the input");
         assert_eq!(
             too_long(EcLevel::L).to_string(),

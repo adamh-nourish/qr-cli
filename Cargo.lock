@@ -434,6 +434,7 @@ dependencies = [
  "predicates",
  "qr-core",
  "rqrr",
+ "tempfile",
  "terminal_size",
  "thiserror",
 ]

@@ -26,8 +26,9 @@ mod tooling;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 
-use clap::Parser as _;
-use qr_core::sanitize_lines_for_terminal;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::{CommandFactory as _, Parser as _};
+use qr_core::{sanitize_for_terminal, sanitize_lines_for_terminal};
 
 pub use crate::cli::Cli;
 use crate::cli::Command;
@@ -102,6 +103,16 @@ where
 
 /// Prints a clap error (or `--help`/`--version` output) and picks the status.
 fn report_parse_error(err: &clap::Error, ctx: &mut Context<'_>) -> ExitStatus {
+    if let Some(extra) = extra_argument(err) {
+        // Best effort, as below. The argument is user data.
+        let _ = write!(
+            ctx.stderr,
+            "error: unexpected extra argument '{}'\n  \
+             hint: quote text that contains spaces: qr 'hello world'\n",
+            sanitize_for_terminal(&extra)
+        );
+        return ExitStatus::Usage;
+    }
     let rendered = err.render().to_string();
     if err.use_stderr() {
         // Clap quotes the offending argument, which is user data.
@@ -125,6 +136,28 @@ fn report_parse_error(err: &clap::Error, ctx: &mut Context<'_>) -> ExitStatus {
             }
         }
     }
+}
+
+/// The stray word in `qr hello world`, if that is what `err` is about.
+///
+/// With `args_conflicts_with_subcommands`, clap reads a second positional
+/// word as a subcommand and reports "the subcommand 'world' cannot be used
+/// with '[TEXT]'", even when no such subcommand exists. That is almost
+/// always unquoted text, so it gets a clearer message. A real subcommand
+/// name (`qr hello man`) keeps clap's own error.
+fn extra_argument(err: &clap::Error) -> Option<String> {
+    if err.kind() != ErrorKind::ArgumentConflict {
+        return None;
+    }
+    let Some(ContextValue::String(word)) = err.get(ContextKind::InvalidSubcommand) else {
+        return None;
+    };
+    let mut command = Cli::command();
+    command.build();
+    let is_subcommand = command
+        .get_subcommands()
+        .any(|sub| sub.get_name() == word || sub.get_all_aliases().any(|alias| alias == word));
+    (!is_subcommand).then(|| word.clone())
 }
 
 #[cfg(test)]

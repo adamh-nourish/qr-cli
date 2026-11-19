@@ -26,6 +26,7 @@ divan = "0.1.21"
 assert_cmd = "2"
 predicates = "3"
 insta = { version = "1", default-features = false }
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

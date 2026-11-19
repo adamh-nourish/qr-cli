@@ -75,7 +75,9 @@ impl Generate<'_, '_> {
                 Some("use --margin 4"),
             );
         }
-        if format == OutputFormat::Terminal && env.stdout_is_tty {
+        // Any text format wraps on a narrow terminal, and ASCII (two columns
+        // per module) is the widest of them.
+        if env.stdout_is_tty {
             check_width(code.matrix(), text_format, &options, env, reporter);
         }
 
@@ -132,7 +134,11 @@ fn check_width(
                 "the code is {needed} columns wide but the terminal has {available}; \
                  it will wrap and not scan"
             ),
-            Some("widen the terminal, lower --margin or shorten the input"),
+            Some(if format == TextFormat::Ascii {
+                "widen the terminal, use -f text (half as wide) or shorten the input"
+            } else {
+                "widen the terminal or shorten the input"
+            }),
         );
     }
 }

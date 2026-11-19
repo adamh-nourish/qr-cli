@@ -11,6 +11,10 @@ use crate::matrix::Matrix;
 /// The quiet zone, in modules, that ISO/IEC 18004 requires around a symbol.
 pub const DEFAULT_MARGIN: usize = 4;
 
+/// The largest quiet zone the renderers draw, in modules. Larger margins are
+/// clamped to it, so a caller cannot make a rendering of unbounded size.
+pub const MAX_MARGIN: usize = 100;
+
 /// Selects the SGR colours for the ANSI renderer: black foreground on a
 /// bright white background, so the code scans on dark terminal themes.
 const ANSI_BLACK_ON_WHITE: &str = "\x1b[30;107m";
@@ -78,7 +82,8 @@ impl TextFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct TextOptions {
-    /// Quiet zone around the symbol, in modules.
+    /// Quiet zone around the symbol, in modules. Renderers clamp it to
+    /// [`MAX_MARGIN`].
     pub margin: usize,
     /// Swap dark and light, quiet zone included. Useful when plain Unicode
     /// output is shown light-on-dark.
@@ -95,11 +100,32 @@ impl Default for TextOptions {
 }
 
 impl TextOptions {
-    /// Returns these options with the given quiet zone, in modules.
+    /// Returns these options with the given quiet zone, in modules, clamped
+    /// to [`MAX_MARGIN`].
+    ///
+    /// ```
+    /// use qr_core::TextOptions;
+    /// use qr_core::render::MAX_MARGIN;
+    /// assert_eq!(TextOptions::default().with_margin(usize::MAX).margin, MAX_MARGIN);
+    /// ```
     #[must_use]
     pub const fn with_margin(mut self, margin: usize) -> Self {
-        self.margin = margin;
+        self.margin = if margin > MAX_MARGIN {
+            MAX_MARGIN
+        } else {
+            margin
+        };
         self
+    }
+
+    /// The margin the renderers use: [`Self::margin`] clamped to
+    /// [`MAX_MARGIN`], since the field is public and may be set directly.
+    const fn effective_margin(&self) -> usize {
+        if self.margin > MAX_MARGIN {
+            MAX_MARGIN
+        } else {
+            self.margin
+        }
     }
 
     /// Returns these options with dark and light swapped (or not).
@@ -125,8 +151,8 @@ impl TextOptions {
 /// ```
 pub fn render_text(matrix: &Matrix, format: TextFormat, options: &TextOptions) -> String {
     let side = frame_side(matrix, options);
-    let dark =
-        |x: usize, y: usize| matrix.is_dark_with_margin(x, y, options.margin) != options.invert;
+    let margin = options.effective_margin();
+    let dark = |x: usize, y: usize| matrix.is_dark_with_margin(x, y, margin) != options.invert;
     // Half blocks are 3 bytes in UTF-8; ASCII modules are 2 bytes.
     let line_bytes = side
         .saturating_mul(3)
@@ -168,7 +194,7 @@ pub fn render_text(matrix: &Matrix, format: TextFormat, options: &TextOptions) -
 fn frame_side(matrix: &Matrix, options: &TextOptions) -> usize {
     matrix
         .width()
-        .saturating_add(options.margin.saturating_mul(2))
+        .saturating_add(options.effective_margin().saturating_mul(2))
 }
 
 /// The character that draws a cell whose upper half is `top` and lower half
@@ -309,14 +335,22 @@ mod tests {
     }
 
     #[test]
-    fn huge_margins_saturate_instead_of_overflowing() {
+    fn huge_margins_are_clamped() {
         let m = Matrix::from_modules(1, vec![true]).unwrap();
-        let options = TextOptions::default().with_margin(usize::MAX);
-        assert_eq!(TextFormat::Ascii.columns(&m, &options), usize::MAX);
-        assert_eq!(
-            TextFormat::Unicode.lines(&m, &options),
-            usize::MAX.div_ceil(2)
-        );
+        let side = 1 + 2 * MAX_MARGIN;
+        let via_builder = TextOptions::default().with_margin(usize::MAX);
+        assert_eq!(via_builder.margin, MAX_MARGIN);
+        // The field is public, so a direct assignment must be clamped too.
+        let direct = TextOptions {
+            margin: usize::MAX,
+            ..TextOptions::default()
+        };
+        for options in [via_builder, direct] {
+            assert_eq!(TextFormat::Ascii.columns(&m, &options), 2 * side);
+            assert_eq!(TextFormat::Unicode.lines(&m, &options), side.div_ceil(2));
+            let text = render_text(&m, TextFormat::Ascii, &options);
+            assert_eq!(text.lines().count(), side);
+        }
     }
 
     #[test]

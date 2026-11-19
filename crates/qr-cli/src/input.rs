@@ -1,8 +1,8 @@
 //! Resolving and reading the data to encode.
 //!
-//! Exactly one source is used: the `TEXT` argument, stdin (`-`, or
-//! implicitly when there is no `TEXT` and stdin is not a terminal) or a file
-//! given with `-i`. Clap rejects `TEXT` together with `-i`. Reads from
+//! Exactly one source is used: the `TEXT` argument, stdin (`-` or `-i -`,
+//! or implicitly when there is no `TEXT` and stdin is not a terminal) or a
+//! file given with `-i`. Clap rejects `TEXT` together with `-i`. Reads from
 //! stdin and files go through [`Read::take`], so a huge input is never
 //! buffered in full.
 
@@ -57,7 +57,7 @@ pub struct Input {
 pub struct InputRequest<'a> {
     /// The `TEXT` argument, if any (`-` means stdin).
     pub text: Option<&'a str>,
-    /// The `-i FILE` argument, if any.
+    /// The `-i FILE` argument, if any (`-` means stdin).
     pub file: Option<&'a Path>,
     /// Keep one trailing newline from stdin or a file.
     pub keep_newline: bool,
@@ -88,7 +88,8 @@ pub fn read_input<R: Read>(
                 source: InputSource::Argument,
             });
         }
-        (_, Some(path)) => InputSource::File(path.to_path_buf()),
+        // `-i -` means stdin, as `-` does for TEXT.
+        (_, Some(path)) if path != Path::new("-") => InputSource::File(path.to_path_buf()),
         _ => InputSource::Stdin,
     };
 
@@ -184,11 +185,15 @@ mod tests {
 
     #[test]
     fn dash_and_no_argument_read_stdin() {
-        for text in [Some("-"), None] {
-            let input = read_input(&request(text, None), &b"hello\n"[..], false).unwrap();
+        let dash = Path::new("-");
+        for (text, file) in [(Some("-"), None), (None, None), (None, Some(dash))] {
+            let input = read_input(&request(text, file), &b"hello\n"[..], false).unwrap();
             assert_eq!(input.data, b"hello");
             assert_eq!(input.source, InputSource::Stdin);
         }
+        // `-i -` is still guarded against an interactive stdin.
+        let err = read_input(&request(None, Some(dash)), FailingReader, true).unwrap_err();
+        assert!(matches!(err, CliError::StdinIsTerminal));
     }
 
     #[test]
@@ -266,8 +271,8 @@ mod tests {
 
     #[test]
     fn files_are_read_raw_and_bounded() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("qr-cli-input-test-{}.bin", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.bin");
         let mut f = File::create(&path).unwrap();
         f.write_all(b"\x00\xffbinary\n").unwrap();
         drop(f);

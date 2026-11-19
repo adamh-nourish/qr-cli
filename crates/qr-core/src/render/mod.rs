@@ -6,4 +6,4 @@
 
 mod text;
 
-pub use self::text::{DEFAULT_MARGIN, TextFormat, TextOptions, render_text};
+pub use self::text::{DEFAULT_MARGIN, MAX_MARGIN, TextFormat, TextOptions, render_text};
