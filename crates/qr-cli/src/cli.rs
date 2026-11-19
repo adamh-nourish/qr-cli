@@ -10,17 +10,24 @@ use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use qr_core::{EcLevel, Mask, ModeChoice, Version};
+use qr_core::render::MAX_CANVAS_SIDE;
+use qr_core::{Color, EcLevel, Mask, ModeChoice, Version};
 
 /// The largest `--margin` accepted, in modules. Equal to the renderer's own
 /// cap, [`qr_core::render::MAX_MARGIN`] (a test keeps them in step).
 pub const MAX_MARGIN: u16 = 100;
 
+/// The largest `--scale` accepted: one module filling the largest canvas
+/// any renderer draws. The renderer still checks the whole canvas.
+pub const MAX_SCALE: u32 = MAX_CANVAS_SIDE;
+
 const AFTER_HELP: &str = "\
 Examples:
   qr 'https://example.com'     Show a QR code in the terminal
   echo hello | qr              Encode stdin (one trailing newline is dropped)
-  qr -i payload.txt -f ascii   Encode a file as ASCII art
+  qr 'hi' -o code.svg          Write an SVG file (format from the extension)
+  qr 'hi' -f pdf -o - > c.pdf  Write a PDF to stdout
+  qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr -- help                   Encode a word that is also a command name,
                                such as 'help', 'man' or 'completions'
 
@@ -69,6 +76,7 @@ pub enum Command {
 
 /// Options for generating a code.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
 pub struct GenerateArgs {
     /// Text to encode; quote it if it contains spaces. '-' reads stdin, which
     /// is also the default when stdin is not a terminal.
@@ -84,7 +92,14 @@ pub struct GenerateArgs {
     )]
     pub input: Option<PathBuf>,
 
-    /// Output format [default: terminal when stdout is a terminal, else text].
+    /// Write the code to PATH ('-' for stdout, not /dev/stdout). Existing
+    /// files are replaced atomically and keep their permissions; a symlink
+    /// is replaced, not followed.
+    #[arg(short = 'o', long = "output", value_name = "PATH|-")]
+    pub output: Option<PathBuf>,
+
+    /// Output format [default: from the -o extension; else terminal when
+    /// stdout is a terminal, otherwise text].
     #[arg(short = 'f', long = "format", value_enum, value_name = "FORMAT")]
     pub format: Option<OutputFormat>,
 
@@ -113,9 +128,44 @@ pub struct GenerateArgs {
     )]
     pub margin: u16,
 
-    /// Swap dark and light modules (for light-on-dark text output).
+    /// Size of one module in pixels (SVG) or points (PDF, EPS) [default: 10].
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_SCALE))
+    )]
+    pub scale: Option<u32>,
+
+    /// Colour of dark modules: #RGB, #RRGGBB, #RRGGBBAA or a CSS name
+    /// [default: black].
+    #[arg(long, value_name = "COLOR", value_parser = Color::from_str)]
+    pub fg: Option<Color>,
+
+    /// Colour of light modules and the quiet zone [default: white].
+    #[arg(long, value_name = "COLOR", value_parser = Color::from_str)]
+    pub bg: Option<Color>,
+
+    /// Leave the background unpainted (image formats only).
+    #[arg(long)]
+    pub transparent: bool,
+
+    /// Swap dark and light modules (or --fg and --bg for images).
     #[arg(long)]
     pub invert: bool,
+
+    /// Print the image as a base64 data: URI instead of raw bytes
+    /// [default format: svg]. With -o, the file holds the URI: use a .txt
+    /// name.
+    #[arg(long)]
+    pub data_uri: bool,
+
+    /// Fail instead of replacing an existing -o file.
+    #[arg(long, requires = "output")]
+    pub no_clobber: bool,
+
+    /// Print a JSON result object on stdout and JSON errors on stderr.
+    #[arg(long)]
+    pub json: bool,
 
     /// Keep a trailing newline read from stdin or a file.
     #[arg(long)]
@@ -149,6 +199,19 @@ pub enum OutputFormat {
     Text,
     /// '##' and spaces, pure ASCII.
     Ascii,
+    /// PNG image (not supported yet).
+    Png,
+    /// Scalable Vector Graphics.
+    Svg,
+    /// JPEG image (not supported yet).
+    #[value(alias = "jpg")]
+    Jpeg,
+    /// Lossless WebP image (not supported yet).
+    Webp,
+    /// One-page vector PDF.
+    Pdf,
+    /// Encapsulated PostScript.
+    Eps,
 }
 
 /// The `--color` setting.
@@ -183,6 +246,8 @@ mod tests {
         assert_eq!(g.mode, ModeChoice::Auto);
         assert_eq!(g.margin, 4);
         assert_eq!((g.qr_version, g.mask, g.format), (None, None, None));
+        assert_eq!((g.output, g.scale, g.fg, g.bg), (None, None, None, None));
+        assert!(!(g.transparent || g.invert || g.data_uri || g.no_clobber || g.json));
         assert_eq!(cli.global.color, ColorChoice::Auto);
         assert!(cli.command.is_none());
     }
@@ -203,6 +268,39 @@ mod tests {
     }
 
     #[test]
+    fn output_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "qr",
+            "-o",
+            "a.svg",
+            "-f",
+            "jpg",
+            "--scale",
+            "3",
+            "--fg",
+            "navy",
+            "--bg",
+            "#fff8",
+            "--no-clobber",
+            "x",
+        ])
+        .unwrap();
+        let g = cli.generate;
+        assert_eq!(g.output.as_deref(), Some(std::path::Path::new("a.svg")));
+        assert_eq!(g.format, Some(OutputFormat::Jpeg));
+        assert_eq!(g.scale, Some(3));
+        assert_eq!(g.fg, Some(Color::rgb(0, 0, 0x80)));
+        assert_eq!(g.bg, Some(Color::rgba(255, 255, 255, 0x88)));
+        assert!(g.no_clobber);
+    }
+
+    #[test]
+    fn no_clobber_needs_an_output_path() {
+        let err = Cli::try_parse_from(["qr", "--no-clobber", "x"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
     fn quiet_and_verbose_conflict() {
         let err = Cli::try_parse_from(["qr", "-q", "-v", "x"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
@@ -216,6 +314,10 @@ mod tests {
             ["qr", "--mode", "kanji"],
             ["qr", "--mask", "8"],
             ["qr", "--margin", "101"],
+            ["qr", "--scale", "0"],
+            ["qr", "--scale", "16385"],
+            ["qr", "--fg", "notacolour"],
+            ["qr", "--bg", "#12"],
         ] {
             let err = Cli::try_parse_from(args).unwrap_err();
             assert_eq!(
