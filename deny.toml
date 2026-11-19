@@ -1,0 +1,62 @@
+# cargo-deny configuration. Run locally with `cargo deny check`.
+# See docs/design/DECISIONS.md section 4.9: no network crates, crates.io only,
+# licences on an allowlist, RustSec advisories are errors.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+exceptions = []
+# The allowlist is policy, not inventory: later PRs pull in BSD, ISC and Zlib crates.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Workspace crates are `publish = false`; still check their licence fields.
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+    # No network access anywhere in the binary.
+    { name = "reqwest", reason = "qr never touches the network" },
+    { name = "hyper", reason = "qr never touches the network" },
+    { name = "ureq", reason = "qr never touches the network" },
+    { name = "curl", reason = "qr never touches the network" },
+    { name = "openssl-sys", reason = "pure-Rust, static builds only" },
+    { name = "openssl", reason = "pure-Rust, static builds only" },
+    { name = "native-tls", reason = "pure-Rust, static builds only" },
+    # No C toolchain or system libraries: all dependencies are pure Rust (DECISIONS section 0, item 11).
+    # If a pure-Rust crate ever needs one of these, add a `wrappers` entry.
+    { name = "cc", reason = "pure-Rust, no C toolchain in the build" },
+    { name = "cmake", reason = "pure-Rust, no C toolchain in the build" },
+    { name = "pkg-config", reason = "pure-Rust, no system libraries" },
+    { name = "bindgen", reason = "pure-Rust, no C bindings" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

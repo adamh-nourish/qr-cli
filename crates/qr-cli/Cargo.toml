@@ -1,0 +1,27 @@
+[package]
+name = "qr-cli"
+description = "A fast, secure, portable QR code generator CLI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+keywords = ["qr", "qrcode", "cli", "barcode"]
+categories = ["command-line-utilities", "encoding"]
+
+[[bin]]
+name = "qr"
+path = "src/main.rs"
+
+[dependencies]
+qr-core.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+
+[lints]
+workspace = true

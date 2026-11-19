@@ -1,0 +1,257 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Every `run:` step uses `bash --noprofile --norc -eo pipefail {0}` on all
+# OSes. Without this, Linux/macOS steps get `bash -e {0}` (no pipefail), so a
+# failing command piped into `tee` would leave the step green.
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # Keep in sync with rust-toolchain.toml and rust-version in Cargo.toml.
+  RUST_TOOLCHAIN: "1.99"
+  MSRV: "1.85"
+  # Performance gates (docs/design/DECISIONS.md section 5).
+  MAX_BINARY_BYTES: "6000000"
+  MAX_STARTUP_MS: "20"
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run --workspace --locked --no-fail-fast
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Line coverage >= 90%
+        run: |
+          cargo llvm-cov nextest --workspace --locked --fail-under-lines 90 --summary-only \
+            | tee coverage.txt
+          {
+            echo '### Coverage'
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo doc --no-deps --workspace --locked
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+      - name: Doctests (nextest does not run them)
+        run: cargo test --doc --workspace --locked
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # `+toolchain` overrides rust-toolchain.toml.
+      - run: cargo "+${MSRV}" check --workspace --all-targets --locked
+
+  deny:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # install-action verifies the release checksum (cargo-deny-action's
+      # Docker image downloads its tarball without one).
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny
+      - run: cargo deny --locked check
+
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint (checksum-verified release)
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: actionlint
+        run: actionlint -color
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: zizmor
+      - name: zizmor (medium severity and above)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --min-severity medium --format github .
+
+  perf-gates:
+    name: Binary size and startup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: hyperfine
+      - name: Build stripped static release binary
+        run: cargo build --release --locked --package qr-cli --bin qr --target "$TARGET"
+      - name: Binary size gate (<= 6 MB)
+        run: |
+          bin="target/${TARGET}/release/qr"
+          size=$(stat -c %s "$bin")
+          echo "### Binary size" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`${TARGET}\` stripped: ${size} bytes (limit ${MAX_BINARY_BYTES})" >> "$GITHUB_STEP_SUMMARY"
+          echo "binary size: ${size} bytes (limit ${MAX_BINARY_BYTES})"
+          test "$size" -le "$MAX_BINARY_BYTES"
+      - name: Startup gate (median qr --version <= 20 ms)
+        run: |
+          bin="target/${TARGET}/release/qr"
+          hyperfine --warmup 5 --runs 30 --shell=none \
+            --export-json startup.json --export-markdown startup.md "$bin --version"
+          # hyperfine 2.x nests stats under .summary; 1.x has a top-level .median.
+          median_ms=$(jq '.results[0] | (.summary.time_wall_clock.median // .median) * 1000' startup.json)
+          if [[ ! $median_ms =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::could not read median startup time from hyperfine (got '${median_ms}')"
+            exit 1
+          fi
+          {
+            echo "### Startup"
+            cat startup.md
+            echo "Median: ${median_ms} ms (limit ${MAX_STARTUP_MS} ms)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "median startup: ${median_ms} ms (limit ${MAX_STARTUP_MS} ms)"
+          awk -v m="$median_ms" -v max="$MAX_STARTUP_MS" 'BEGIN { exit !(m <= max) }'
+
+  # Single stable check name to mark as required once branch protection is
+  # available; new jobs only need adding to `needs`.
+  ci-success:
+    name: CI success
+    if: always()
+    needs: [fmt, clippy, test, coverage, docs, msrv, deny, workflow-lint, perf-gates]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: All required jobs passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do
+            test "$r" = success
+          done

@@ -1,0 +1,5 @@
+# The panic-family lints are denied in [workspace.lints]; tests may use them.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
