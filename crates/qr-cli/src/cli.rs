@@ -11,7 +11,7 @@ use std::str::FromStr;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use qr_core::render::{MAX_CANVAS_SIDE, MAX_DPI};
-use qr_core::{Color, EcLevel, Mask, ModeChoice, Version};
+use qr_core::{Color, EcLevel, Mask, ModeChoice, ModuleShape, Version};
 
 /// The largest `--margin` accepted, in modules. Equal to the renderer's own
 /// cap, [`qr_core::render::MAX_MARGIN`] (a test keeps them in step).
@@ -174,6 +174,21 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub invert: bool,
 
+    /// How dark modules are drawn in images; the three finder patterns stay
+    /// square.
+    #[arg(long, value_enum, value_name = "SHAPE", default_value_t = Shape::Square)]
+    pub shape: Shape,
+
+    /// Read the rendered code back with a decoder and fail (exit 6) unless it
+    /// holds the input. Automatic for --shape, --fg, --bg, --transparent and
+    /// --invert images.
+    #[arg(long, overrides_with = "no_verify")]
+    pub verify: bool,
+
+    /// Skip the automatic read-back check.
+    #[arg(long, overrides_with = "verify")]
+    pub no_verify: bool,
+
     /// Print the image as a base64 data: URI instead of raw bytes
     /// [default format: svg]. With -o, the file holds the URI: use a .txt
     /// name.
@@ -235,6 +250,28 @@ pub enum OutputFormat {
     Eps,
 }
 
+/// The `--shape` setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum)]
+pub enum Shape {
+    /// Full squares: the standard look.
+    #[default]
+    Square,
+    /// Squares with their exposed corners rounded.
+    Rounded,
+    /// Circles.
+    Dots,
+}
+
+impl From<Shape> for ModuleShape {
+    fn from(shape: Shape) -> Self {
+        match shape {
+            Shape::Square => Self::Square,
+            Shape::Rounded => Self::Rounded,
+            Shape::Dots => Self::Dots,
+        }
+    }
+}
+
 /// The `--color` setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum)]
 pub enum ColorChoice {
@@ -270,6 +307,8 @@ mod tests {
         assert_eq!((g.output, g.scale, g.fg, g.bg), (None, None, None, None));
         assert_eq!((g.size, g.dpi), (None, None));
         assert!(!(g.transparent || g.invert || g.data_uri || g.no_clobber || g.json));
+        assert_eq!(g.shape, Shape::Square);
+        assert!(!(g.verify || g.no_verify));
         assert_eq!(cli.global.color, ColorChoice::Auto);
         assert!(cli.command.is_none());
     }
@@ -325,6 +364,23 @@ mod tests {
         );
         let err = Cli::try_parse_from(["qr", "--size", "512", "--scale", "4", "x"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn shape_and_verify_flags_parse() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().generate;
+        let g = parse(&["qr", "--shape", "dots", "x"]);
+        assert_eq!(g.shape, Shape::Dots);
+        assert_eq!(ModuleShape::from(g.shape), ModuleShape::Dots);
+        assert_eq!(ModuleShape::from(Shape::Rounded), ModuleShape::Rounded);
+        assert_eq!(ModuleShape::from(Shape::Square), ModuleShape::Square);
+        // The last of --verify and --no-verify wins.
+        let g = parse(&["qr", "--verify", "--no-verify", "x"]);
+        assert!(!g.verify && g.no_verify);
+        let g = parse(&["qr", "--no-verify", "--verify", "x"]);
+        assert!(g.verify && !g.no_verify);
+        let err = Cli::try_parse_from(["qr", "--shape", "star", "x"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]

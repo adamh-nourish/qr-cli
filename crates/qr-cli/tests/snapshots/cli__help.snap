@@ -83,6 +83,23 @@ Options:
       --invert
           Swap dark and light modules (or --fg and --bg for images)
 
+      --shape <SHAPE>
+          How dark modules are drawn in images; the three finder patterns stay square
+
+          Possible values:
+          - square:  Full squares: the standard look
+          - rounded: Squares with their exposed corners rounded
+          - dots:    Circles
+          
+          [default: square]
+
+      --verify
+          Read the rendered code back with a decoder and fail (exit 6) unless it holds the input.
+          Automatic for --shape, --fg, --bg, --transparent and --invert images
+
+      --no-verify
+          Skip the automatic read-back check
+
       --data-uri
           Print the image as a base64 data: URI instead of raw bytes [default format: svg]. With -o,
           the file holds the URI: use a .txt name

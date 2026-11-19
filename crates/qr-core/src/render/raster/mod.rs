@@ -10,6 +10,7 @@
 //! which it describes as runs of light and dark pixels.
 
 mod canvas;
+mod grey;
 mod jpeg;
 mod paint;
 mod png;
@@ -18,6 +19,7 @@ mod webp;
 use std::fmt;
 use std::str::FromStr;
 
+pub(crate) use self::grey::{GreyImage, greyscale, luma};
 pub use self::jpeg::render_jpeg;
 pub use self::png::render_png;
 pub use self::webp::render_webp;

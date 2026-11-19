@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::color::Color;
 use crate::matrix::Matrix;
+use crate::render::shape::ModuleShape;
 use crate::render::text::{DEFAULT_MARGIN, MAX_MARGIN};
 
 /// The default size of one module: pixels for SVG, points for PDF and EPS.
@@ -132,6 +133,8 @@ pub struct RenderOptions {
     pub bg: Color,
     /// Leave the background unpainted, whatever the alpha of [`Self::bg`].
     pub transparent: bool,
+    /// How dark modules are drawn. The finder patterns stay square.
+    pub shape: ModuleShape,
     /// Optional document title, written as escaped metadata (SVG `<title>`,
     /// the PDF `/Title` entry and the EPS `%%Title` comment).
     pub title: Option<String>,
@@ -147,6 +150,7 @@ impl Default for RenderOptions {
             fg: Color::BLACK,
             bg: Color::WHITE,
             transparent: false,
+            shape: ModuleShape::Square,
             title: None,
         }
     }
@@ -201,6 +205,13 @@ impl RenderOptions {
     #[must_use]
     pub fn with_transparent(mut self, transparent: bool) -> Self {
         self.transparent = transparent;
+        self
+    }
+
+    /// Returns these options with the given module shape.
+    #[must_use]
+    pub fn with_shape(mut self, shape: ModuleShape) -> Self {
+        self.shape = shape;
         self
     }
 
@@ -304,6 +315,7 @@ mod tests {
         assert_eq!((o.margin, o.scale), (4, 10));
         assert_eq!((o.fg, o.bg), (Color::BLACK, Color::WHITE));
         assert!(!o.transparent && o.title.is_none());
+        assert_eq!(o.shape, ModuleShape::Square);
         assert_eq!((o.size, o.dpi), (None, None));
         assert_eq!(o.background(), Color::WHITE);
     }
@@ -318,7 +330,9 @@ mod tests {
             .with_fg(Color::WHITE)
             .with_bg(Color::BLACK)
             .with_transparent(true)
+            .with_shape(ModuleShape::Dots)
             .with_title("t");
+        assert_eq!(o.shape, ModuleShape::Dots);
         assert_eq!(o.margin, MAX_MARGIN);
         assert_eq!((o.scale, o.size, o.dpi), (3, Some(7), Some(300)));
         assert_eq!((o.fg, o.bg), (Color::WHITE, Color::BLACK));

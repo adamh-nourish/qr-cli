@@ -3,8 +3,9 @@
 //! This crate is deliberately free of I/O. It holds the module [`Matrix`],
 //! the [`QrEncoder`] abstraction, exact [`capacity`] limits, the typed
 //! [`Color`], the text, vector (SVG, PDF, EPS) and raster (PNG, JPEG,
-//! WebP) [`render`]ers and [`sanitize_for_terminal`]. Later changes add
-//! payload builders and styling. The `qr-cli`
+//! WebP) [`render`]ers with their [`ModuleShape`]s, colour [`Contrast`],
+//! read-back [`verify`]cation with `rqrr` and [`sanitize_for_terminal`].
+//! Later changes add payload builders and logos. The `qr-cli`
 //! crate owns argument parsing, files, streams and exit codes.
 //!
 //! ```
@@ -20,15 +21,18 @@
 
 pub mod capacity;
 mod color;
+mod contrast;
 mod encode;
 mod error;
 mod matrix;
 mod options;
 pub mod render;
 mod sanitize;
+pub mod verify;
 
 pub use crate::capacity::max_chars;
 pub use crate::color::{Color, ColorError};
+pub use crate::contrast::{Contrast, MIN_CONTRAST};
 pub use crate::encode::{EncodePlan, FastQrEncoder, QrCode, QrEncoder, encode, plan};
 pub use crate::error::{CapacityError, EncodeError};
 pub use crate::matrix::{Matrix, MatrixError};
@@ -36,9 +40,10 @@ pub use crate::options::{
     EcLevel, EncodeOptions, Mask, Mode, ModeChoice, OptionError, Version, VersionChoice,
 };
 pub use crate::render::{
-    RasterFormat, RenderError, RenderOptions, TextFormat, TextOptions, UnknownRasterFormat,
-    UnknownVectorFormat, VectorFormat, render_eps, render_jpeg, render_pdf, render_png,
-    render_raster, render_svg, render_text, render_vector, render_webp,
+    ModuleShape, RasterFormat, RenderError, RenderOptions, TextFormat, TextOptions,
+    UnknownModuleShape, UnknownRasterFormat, UnknownVectorFormat, VectorFormat, render_eps,
+    render_jpeg, render_pdf, render_png, render_raster, render_svg, render_text, render_vector,
+    render_webp,
 };
 pub use crate::sanitize::{sanitize_for_terminal, sanitize_lines_for_terminal};
 

@@ -2,19 +2,21 @@
 
 use std::io::{Read, Write};
 
-use qr_core::render::{DEFAULT_MARGIN, DEFAULT_SCALE};
+use qr_core::render::DEFAULT_MARGIN;
 use qr_core::{
-    Color, EncodeOptions, Matrix, QrCode, RasterFormat, RenderOptions, TextFormat, TextOptions,
-    VersionChoice, encode, render_raster, render_text, render_vector,
+    EncodeOptions, Matrix, QrCode, RasterFormat, TextFormat, TextOptions, VersionChoice, encode,
+    render_raster, render_text, render_vector,
 };
 
-use crate::cli::{ColorChoice, GenerateArgs, OutputFormat};
+use crate::cli::{ColorChoice, GenerateArgs, OutputFormat, Shape};
 use crate::diag::Reporter;
 use crate::env::Env;
 use crate::error::CliError;
 use crate::input::{Input, InputRequest, read_input};
 use crate::output::json::{self, Generated};
 use crate::output::{Delivered, Plan, Renderer, Target};
+use crate::style;
+use crate::verify::{self, Subject};
 
 /// Streams and settings the generate command needs.
 pub(crate) struct Generate<'a, 'r> {
@@ -62,14 +64,18 @@ impl Generate<'_, '_> {
             );
         }
 
-        let rendered = match plan.format.renderer() {
+        let options = style::render_options(args);
+        let renderer = plan.format.renderer();
+        let bytes = match renderer {
             Renderer::Raster(format) => {
                 warn_lost_settings(args, plan.format, reporter);
-                render_raster(code.matrix(), format, &render_options(args))?
+                style::warn_contrast(args, &options, renderer, reporter);
+                render_raster(code.matrix(), format, &options)?
             }
             Renderer::Vector(format) => {
                 warn_lost_settings(args, plan.format, reporter);
-                render_vector(code.matrix(), format, &render_options(args))?
+                style::warn_contrast(args, &options, renderer, reporter);
+                render_vector(code.matrix(), format, &options)?
             }
             Renderer::Text => {
                 warn_unused_image_flags(args, reporter);
@@ -97,35 +103,29 @@ impl Generate<'_, '_> {
             }
         };
 
-        let delivered = plan.deliver(rendered, stdout)?;
+        // Checked before anything is written, so a failing code never lands.
+        let mode = verify::Mode::select(args, renderer, style::is_styled(&options));
+        let subject = Subject {
+            matrix: code.matrix(),
+            renderer,
+            format: plan.format.name(),
+            rendered: &bytes,
+            options: &options,
+            data: &input.data,
+        };
+        let verified = verify::run(mode, verify::AUTO_VERIFY, &subject, reporter)?;
+
+        let delivered = plan.deliver(bytes, stdout)?;
         if plan.json {
-            let line = json::object(&result(&plan, &input, &code, delivered));
+            let mut result = result(&plan, &input, &code, delivered);
+            result.verified = verified;
+            let line = json::object(&result);
             stdout
                 .write_all(line.as_bytes())
                 .map_err(CliError::Output)?;
         }
         Ok(())
     }
-}
-
-/// The renderer options selected by the flags. `--invert` swaps the
-/// colours, so it composes with `--fg` and `--bg`.
-fn render_options(args: &GenerateArgs) -> RenderOptions {
-    let (mut fg, mut bg) = (
-        args.fg.unwrap_or(Color::BLACK),
-        args.bg.unwrap_or(Color::WHITE),
-    );
-    if args.invert {
-        std::mem::swap(&mut fg, &mut bg);
-    }
-    RenderOptions::default()
-        .with_margin(usize::from(args.margin))
-        .with_scale(args.scale.unwrap_or(DEFAULT_SCALE))
-        .with_size(args.size)
-        .with_dpi(args.dpi)
-        .with_fg(fg)
-        .with_bg(bg)
-        .with_transparent(args.transparent)
 }
 
 /// Warns about image-only flags given with a text format, where they would
@@ -138,6 +138,7 @@ fn warn_unused_image_flags(args: &GenerateArgs, reporter: &mut Reporter<'_>) {
         (args.fg.is_some(), "--fg"),
         (args.bg.is_some(), "--bg"),
         (args.transparent, "--transparent"),
+        (args.shape != Shape::Square, "--shape"),
     ]
     .into_iter()
     .filter_map(|(set, flag)| set.then_some(flag))
@@ -206,6 +207,7 @@ fn result(plan: &Plan, input: &Input, code: &QrCode, delivered: Delivered) -> Ge
         bytes: input.data.len(),
         written: delivered.written,
         data_uri: delivered.data_uri,
+        verified: None,
     }
 }
 

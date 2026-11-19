@@ -3,6 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use qr_core::verify::VerifyError;
 use qr_core::{EcLevel, EncodeError, RenderError, max_chars};
 
 use crate::cli::OutputFormat;
@@ -76,6 +77,18 @@ pub enum CliError {
     #[error(transparent)]
     Render(#[from] RenderError),
 
+    /// The rendered code did not read back as the input, or the check
+    /// could not run.
+    #[error("{error}")]
+    Verify {
+        /// What went wrong.
+        #[source]
+        error: VerifyError,
+        /// Whether the check ran automatically, for a styled image, rather
+        /// than because of `--verify`.
+        automatic: bool,
+    },
+
     /// `--no-clobber` and the output file exists.
     #[error("output file '{}' already exists", .0.display())]
     OutputExists(PathBuf),
@@ -110,11 +123,20 @@ impl CliError {
             | Self::BinaryToTerminal(_)
             | Self::DataUriNeedsImage(_)
             | Self::JsonNeedsOutput(_) => ExitStatus::Usage,
+            Self::Verify { error, .. } if error.is_failure() => ExitStatus::VerificationFailed,
             // An encoder failing on valid options is not the user's fault.
-            Self::Render(RenderError::Encoder { .. }) => ExitStatus::Internal,
+            Self::Render(RenderError::Encoder { .. })
+            | Self::Verify {
+                error: VerifyError::Render(RenderError::Encoder { .. }),
+                ..
+            } => ExitStatus::Internal,
             // Every other render error is a size or option limit.
             #[allow(clippy::match_same_arms)]
-            Self::Render(_) => ExitStatus::Usage,
+            Self::Render(_)
+            | Self::Verify {
+                error: VerifyError::Render(_),
+                ..
+            } => ExitStatus::Usage,
             Self::InputTooLong { .. } | Self::Encode(EncodeError::DataTooLong(_)) => {
                 ExitStatus::DataTooLong
             }
@@ -123,7 +145,8 @@ impl CliError {
             | Self::OutputExists(_)
             | Self::OutputNotAFile(_)
             | Self::WriteFile { .. } => ExitStatus::Io,
-            Self::Encode(_) | Self::Internal(_) => ExitStatus::Internal,
+            // A verify error left here is our own output failing to decode.
+            Self::Encode(_) | Self::Internal(_) | Self::Verify { .. } => ExitStatus::Internal,
         }
     }
 
@@ -142,10 +165,15 @@ impl CliError {
             Self::BinaryToTerminal(_) => "binary_to_terminal",
             Self::DataUriNeedsImage(_) => "data_uri_needs_image",
             Self::JsonNeedsOutput(_) => "json_needs_output",
-            Self::Render(_) => "render_failed",
+            Self::Verify { error, .. } if error.is_failure() => "verification_failed",
+            Self::Render(_)
+            | Self::Verify {
+                error: VerifyError::Render(_),
+                ..
+            } => "render_failed",
             Self::OutputExists(_) => "output_exists",
             Self::OutputNotAFile(_) => "output_not_a_file",
-            Self::Encode(_) | Self::Internal(_) => "internal",
+            Self::Encode(_) | Self::Internal(_) | Self::Verify { .. } => "internal",
         }
     }
 
@@ -199,6 +227,20 @@ impl CliError {
             Self::WriteFile { error, .. } if error.kind() == io::ErrorKind::PermissionDenied => {
                 Some("check that you can write to the directory (use -o - for stdout)".to_owned())
             }
+            Self::Verify { error, automatic } if error.is_failure() => Some(
+                if *automatic {
+                    "styled codes are checked automatically: try --ec H, a larger --scale, \
+                     --shape square or stronger colours, or pass --no-verify to write it anyway"
+                } else {
+                    "try --ec H, a larger --scale, --shape square or stronger colours"
+                }
+                .to_owned(),
+            ),
+            Self::Verify {
+                error: VerifyError::Render(_),
+                ..
+            } => None,
+            Self::Verify { .. } => Some("this is a bug; please report it".to_owned()),
             // A render error's message already says what to change.
             Self::ReadInput { .. } | Self::Output(_) | Self::WriteFile { .. } | Self::Render(_) => {
                 None
@@ -314,6 +356,69 @@ mod tests {
             if status != ExitStatus::Io {
                 assert!(err.hint().is_some(), "{err}");
             }
+        }
+    }
+
+    #[test]
+    fn verify_errors_have_statuses_codes_and_hints() {
+        let verify = |error, automatic| CliError::Verify { error, automatic };
+        let not_found = || VerifyError::NotFound { format: "png" };
+        let explicit = verify(not_found(), false);
+        assert_eq!(explicit.exit_status(), ExitStatus::VerificationFailed);
+        assert_eq!(explicit.code(), "verification_failed");
+        assert_eq!(
+            explicit.to_string(),
+            "no QR code could be read back from the rendered png"
+        );
+        assert!(!explicit.hint().unwrap().contains("--no-verify"));
+        assert!(explicit.source().is_some());
+        let auto = verify(
+            VerifyError::Mismatch {
+                format: "svg",
+                expected: 1,
+                decoded: 2,
+            },
+            true,
+        );
+        assert_eq!(auto.exit_status(), ExitStatus::VerificationFailed);
+        assert!(auto.hint().unwrap().contains("--no-verify"));
+
+        let table = [
+            (
+                verify(VerifyError::Render(RenderError::ZeroScale), true),
+                ExitStatus::Usage,
+                "render_failed",
+                false,
+            ),
+            (
+                verify(
+                    VerifyError::Render(RenderError::Encoder {
+                        format: "verify",
+                        message: "oom".into(),
+                    }),
+                    false,
+                ),
+                ExitStatus::Internal,
+                "render_failed",
+                false,
+            ),
+            (
+                verify(
+                    VerifyError::ReadBack {
+                        format: "png",
+                        message: "bad".into(),
+                    },
+                    true,
+                ),
+                ExitStatus::Internal,
+                "internal",
+                true,
+            ),
+        ];
+        for (err, status, code, hint) in table {
+            assert_eq!(err.exit_status(), status, "{err}");
+            assert_eq!(err.code(), code, "{err}");
+            assert_eq!(err.hint().is_some(), hint, "{err}");
         }
     }
 

@@ -1,7 +1,7 @@
 //! SVG renderer, built with the typed [`XmlWriter`].
 //!
 //! The document is a background `<rect>` and one `<path>` holding every dark
-//! run. Coordinates are in modules (`viewBox`), and `width`/`height` scale
+//! run (or, for rounded and dotted modules, every outline). Coordinates are in modules (`viewBox`), and `width`/`height` scale
 //! the drawing to `scale` pixels per module. The output never contains
 //! scripts, event attributes, `<foreignObject>`, links or external
 //! references; colours are written from the typed [`Color`](crate::Color).
@@ -10,7 +10,9 @@ use std::fmt::Write as _;
 
 use super::escape;
 use super::options::{MAX_CANVAS_SIDE, RenderError, RenderOptions};
+use super::outline::{Num, Primitive, Segment, primitives};
 use super::runs::dark_runs;
+use super::shape::ModuleShape;
 use super::xml::XmlWriter;
 use crate::color::Color;
 use crate::matrix::Matrix;
@@ -43,9 +45,13 @@ pub fn render_svg(matrix: &Matrix, options: &RenderOptions) -> Result<String, Re
         .attr("version", "1.1")
         .attr("width", layout.side)
         .attr("height", layout.side)
-        .attr("viewBox", format_args!("0 0 {modules} {modules}"))
-        .attr("shape-rendering", "crispEdges")
-        .newline();
+        .attr("viewBox", format_args!("0 0 {modules} {modules}"));
+    // Square modules sit on whole units, so crisp edges avoid seams; curves
+    // need anti-aliasing.
+    if options.shape == ModuleShape::Square {
+        w.attr("shape-rendering", "crispEdges");
+    }
+    w.newline();
 
     if let Some(title) = &options.title {
         w.start("title").text(title).end().newline();
@@ -60,7 +66,10 @@ pub fn render_svg(matrix: &Matrix, options: &RenderOptions) -> Result<String, Re
         w.end().newline();
     }
 
-    let d = path_data(matrix, margin);
+    let d = match options.shape {
+        ModuleShape::Square => path_data(matrix, margin),
+        shape => shaped_path_data(matrix, shape, margin),
+    };
     if !d.is_empty() && !options.fg.is_invisible() {
         w.start("path");
         fill(&mut w, options.fg);
@@ -87,6 +96,38 @@ fn path_data(matrix: &Matrix, margin: u32) -> String {
         };
         let _ = write!(d, "h{len}v1h-{len}z");
         previous = Some((x, y));
+    }
+    d
+}
+
+/// The path data for `shape`, all in absolute coordinates: each square run
+/// as `M{x} {y}h{len}v1h-{len}z` and each outline as `M`, `L`, `C` and `Z`
+/// commands.
+fn shaped_path_data(matrix: &Matrix, shape: ModuleShape, margin: u32) -> String {
+    let mut d = String::new();
+    for primitive in primitives(matrix, shape, margin) {
+        match primitive {
+            Primitive::Rect(run) => {
+                let _ = write!(d, "M{} {}h{len}v1h-{len}z", run.x, run.y, len = run.len);
+            }
+            Primitive::Shape(kind) => kind.outline(|segment| {
+                let _ = match segment {
+                    Segment::Move(p) => write!(d, "M{} {}", Num(p.x), Num(p.y)),
+                    Segment::Line(p) => write!(d, "L{} {}", Num(p.x), Num(p.y)),
+                    Segment::Cubic(a, b, p) => write!(
+                        d,
+                        "C{} {} {} {} {} {}",
+                        Num(a.x),
+                        Num(a.y),
+                        Num(b.x),
+                        Num(b.y),
+                        Num(p.x),
+                        Num(p.y)
+                    ),
+                    Segment::Close => write!(d, "Z"),
+                };
+            }),
+        }
     }
     d
 }
@@ -120,6 +161,37 @@ mod tests {
              <path fill=\"#000000\" d=\"M1 1h2v1h-2zm1 1h1v1h-1z\"/>\n\
              </svg>\n"
         );
+    }
+
+    #[test]
+    fn shapes_draw_outlines_without_crisp_edges() {
+        // A lone module in a 3x3 grid with a margin of 1.
+        let m = Matrix::from_modules(
+            3,
+            vec![false, false, false, false, true, false, false, false, false],
+        )
+        .unwrap();
+        let options = RenderOptions::default()
+            .with_margin(1)
+            .with_scale(2)
+            .with_shape(ModuleShape::Dots);
+        let svg = render_svg(&m, &options).unwrap();
+        assert!(!svg.contains("crispEdges"), "{svg}");
+        assert!(
+            svg.contains(
+                "d=\"M2.95 2.5C2.95 2.7485 2.7485 2.95 2.5 2.95C2.2515 2.95 2.05 2.7485 \
+                 2.05 2.5C2.05 2.2515 2.2515 2.05 2.5 2.05C2.7485 2.05 2.95 2.2515 2.95 2.5Z\""
+            ),
+            "{svg}"
+        );
+        let rounded = render_svg(&m, &options.clone().with_shape(ModuleShape::Rounded)).unwrap();
+        assert!(rounded.contains("d=\"M2.5 2L2.5 2C"), "{rounded}");
+        assert!(rounded.ends_with("Z\"/>\n</svg>\n"), "{rounded}");
+
+        // Runs that touch nothing above or below stay plain rectangles.
+        let full = Matrix::from_modules(3, vec![true; 9]).unwrap();
+        let rounded = render_svg(&full, &options.with_shape(ModuleShape::Rounded)).unwrap();
+        assert!(rounded.contains("M1 2h3v1h-3z"), "{rounded}");
     }
 
     #[test]

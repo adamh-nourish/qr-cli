@@ -8,9 +8,10 @@
 
 use std::hint::black_box;
 
+use qr_core::verify::{verify_raster, verify_rendering};
 use qr_core::{
-    EcLevel, EncodeOptions, Matrix, Mode, RasterFormat, RenderOptions, VectorFormat, Version,
-    VersionChoice, encode, max_chars, render_raster, render_vector,
+    EcLevel, EncodeOptions, Matrix, Mode, ModuleShape, RasterFormat, RenderOptions, VectorFormat,
+    Version, VersionChoice, encode, max_chars, render_raster, render_vector,
 };
 
 fn main() {
@@ -87,4 +88,38 @@ fn pdf(bencher: divan::Bencher, version: u8) {
 #[divan::bench(args = VERSIONS)]
 fn eps(bencher: divan::Bencher, version: u8) {
     vector(bencher, VectorFormat::Eps, version);
+}
+
+/// 1-bit PNG with dotted modules (per-pixel-row shape sampling).
+#[divan::bench(args = VERSIONS)]
+fn png_dots(bencher: divan::Bencher, version: u8) {
+    let matrix = full_matrix(version);
+    let options = RenderOptions::default().with_shape(ModuleShape::Dots);
+    bencher.bench(|| render_raster(black_box(&matrix), RasterFormat::Png, black_box(&options)));
+}
+
+/// SVG with rounded modules (Bezier outlines).
+#[divan::bench(args = VERSIONS)]
+fn svg_rounded(bencher: divan::Bencher, version: u8) {
+    let matrix = full_matrix(version);
+    let options = RenderOptions::default().with_shape(ModuleShape::Rounded);
+    bencher.bench(|| render_vector(black_box(&matrix), VectorFormat::Svg, black_box(&options)));
+}
+
+/// `--verify` of a PNG: decode the file and read it back with rqrr.
+#[divan::bench(args = VERSIONS)]
+fn verify_png(bencher: divan::Bencher, version: u8) {
+    let matrix = full_matrix(version);
+    let options = RenderOptions::default().with_shape(ModuleShape::Dots);
+    let png = render_raster(&matrix, RasterFormat::Png, &options).unwrap_or_default();
+    // The payload does not matter for timing; a mismatch reads just as far.
+    bencher.bench(|| verify_raster(&matrix, RasterFormat::Png, black_box(&png), &options, b""));
+}
+
+/// `--verify` of vector output: redraw the matrix and read it back.
+#[divan::bench(args = VERSIONS)]
+fn verify_svg(bencher: divan::Bencher, version: u8) {
+    let matrix = full_matrix(version);
+    let options = RenderOptions::default().with_shape(ModuleShape::Rounded);
+    bencher.bench(|| verify_rendering(black_box(&matrix), &options, "svg", b""));
 }

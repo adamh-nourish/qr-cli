@@ -39,6 +39,10 @@ pub struct Generated {
     /// The `data:` URI, when `--data-uri` sent it to stdout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_uri: Option<String>,
+    /// Whether the rendered code read back as the input, when it was
+    /// checked (`--verify`, or automatically for a styled image).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
 }
 
 /// A diagnostic, as a one-line JSON object keyed by its kind:
@@ -158,6 +162,7 @@ mod tests {
             bytes: 1,
             written: 1,
             data_uri: None,
+            verified: None,
         };
         let text = object(&g);
         assert!(
@@ -197,6 +202,7 @@ mod tests {
             bytes: 5,
             written: 100,
             data_uri: None,
+            verified: None,
         };
         let text = object(&g);
         assert!(text.ends_with("}\n") && !text[..text.len() - 1].contains('\n'));
@@ -204,6 +210,12 @@ mod tests {
         assert_eq!(r["output"], "code.svg");
         assert_eq!(r["modules"], 21);
         assert!(r.get("data_uri").is_none());
+        assert!(r.get("verified").is_none());
+        let checked = object(&Generated {
+            verified: Some(true),
+            ..g
+        });
+        assert!(checked.ends_with(",\"verified\":true}\n"), "{checked}");
     }
 
     #[test]

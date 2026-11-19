@@ -1,5 +1,6 @@
 //! EPS renderer: hand-written Encapsulated PostScript (EPSF-3.0, language
-//! level 2) with one `rectfill` per dark run.
+//! level 2) with one `rectfill` per dark run. Rounded runs and dots are
+//! outlines of lines and cubic Béziers, filled together at the end.
 //!
 //! PostScript has no transparency, so translucent colours are blended over
 //! what lies beneath them (the background, or white paper where the
@@ -11,7 +12,7 @@ use std::fmt::Write as _;
 
 use super::escape;
 use super::options::{MAX_CANVAS_SIDE, RenderError, RenderOptions};
-use super::runs::dark_runs;
+use super::outline::{Num, Primitive, Segment, primitives};
 use crate::color::Color;
 use crate::matrix::Matrix;
 
@@ -57,24 +58,53 @@ pub fn render_eps(matrix: &Matrix, options: &RenderOptions) -> Result<String, Re
         painted
     };
 
-    let mut runs = dark_runs(matrix).peekable();
-    if !options.fg.is_invisible() && runs.peek().is_some() {
+    let mut shapes = primitives(matrix, options.shape, layout.margin).peekable();
+    if !options.fg.is_invisible() && shapes.peek().is_some() {
         set_rgb(&mut out, options.fg.over(paper));
         let s = layout.scale;
         let _ = writeln!(out, "[{s} 0 0 -{s} 0 {side}] concat");
-        let margin = layout.margin;
-        for run in runs {
-            let _ = writeln!(
-                out,
-                "{} {} {} 1 rectfill",
-                run.x + margin,
-                run.y + margin,
-                run.len
-            );
+        let mut outlines = false;
+        for primitive in shapes {
+            outlines |= draw(&mut out, primitive);
+        }
+        if outlines {
+            out.push_str("fill\n");
         }
     }
     out.push_str("grestore\nshowpage\n%%Trailer\n%%EOF\n");
     Ok(out)
+}
+
+/// Fills a square run at once, or appends an outline to the current path
+/// and returns true.
+fn draw(out: &mut String, primitive: Primitive) -> bool {
+    match primitive {
+        Primitive::Rect(run) => {
+            // `rectfill` leaves the current path alone.
+            let _ = writeln!(out, "{} {} {} 1 rectfill", run.x, run.y, run.len);
+            false
+        }
+        Primitive::Shape(kind) => {
+            kind.outline(|segment| {
+                let _ = match segment {
+                    Segment::Move(p) => writeln!(out, "{} {} moveto", Num(p.x), Num(p.y)),
+                    Segment::Line(p) => writeln!(out, "{} {} lineto", Num(p.x), Num(p.y)),
+                    Segment::Cubic(a, b, p) => writeln!(
+                        out,
+                        "{} {} {} {} {} {} curveto",
+                        Num(a.x),
+                        Num(a.y),
+                        Num(b.x),
+                        Num(b.y),
+                        Num(p.x),
+                        Num(p.y)
+                    ),
+                    Segment::Close => writeln!(out, "closepath"),
+                };
+            });
+            true
+        }
+    }
 }
 
 /// Writes a DSC comment whose value is an escaped PostScript string, cut so
@@ -119,6 +149,29 @@ mod tests {
         assert!(eps.contains("%%BoundingBox: 0 0 20 20\n"));
         assert!(eps.contains("%%Creator: (qr-core "));
         assert!(!eps.contains("%%Title"));
+    }
+
+    #[test]
+    fn shapes_are_filled_outlines() {
+        use crate::render::shape::ModuleShape;
+        let options = RenderOptions::default()
+            .with_margin(1)
+            .with_scale(5)
+            .with_shape(ModuleShape::Dots);
+        let eps = render_eps(&two_by_two(), &options).unwrap();
+        assert!(
+            eps.contains("[5 0 0 -5 0 20] concat\n1.95 1.5 moveto\n"),
+            "{eps}"
+        );
+        assert_eq!(eps.matches("closepath\n").count(), 3, "{eps}");
+        assert!(eps.contains("closepath\nfill\ngrestore\n"), "{eps}");
+        let rounded = render_eps(&two_by_two(), &options.with_shape(ModuleShape::Rounded)).unwrap();
+        assert!(rounded.contains(" curveto\n"), "{rounded}");
+        assert!(
+            rounded
+                .lines()
+                .all(|l| l.len() <= DSC_MAX_LINE && l.is_ascii())
+        );
     }
 
     #[test]
