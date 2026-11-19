@@ -103,10 +103,103 @@ fn raster_formats_are_not_supported_yet() {
         &["-o", "a.PNG", "x"],
     ] {
         let err = error(argv, false);
-        assert!(matches!(err, CliError::UnsupportedFormat(_)), "{argv:?}");
+        assert!(
+            matches!(err, CliError::UnsupportedFormat { .. }),
+            "{argv:?}"
+        );
         assert_eq!(err.exit_status(), ExitStatus::Usage);
         assert!(err.to_string().ends_with("output is not supported yet"));
     }
+}
+
+#[test]
+fn unsupported_format_hints_fit_the_target() {
+    // Stdout, or a data: URI (where -f picks the image): name a format.
+    for argv in [
+        &["-f", "png", "x"][..],
+        &["-f", "png", "--data-uri", "-o", "uri.txt", "x"],
+        &["--data-uri", "-o", "code.png", "x"],
+    ] {
+        let err = error(argv, false);
+        assert_eq!(
+            err.hint().unwrap(),
+            "use -f svg or -f pdf for a scalable image",
+            "{argv:?}"
+        );
+    }
+    // A file named for the format: name a file, so following the hint
+    // never leaves SVG bytes in a .png file.
+    let err = error(&["-o", "out/code.png", "x"], false);
+    assert_eq!(
+        err.hint().unwrap(),
+        "use -o out/code.svg or -o out/code.pdf for a scalable image"
+    );
+    let err = error(&["-f", "webp", "-o", "code.png", "x"], false);
+    assert_eq!(
+        err.hint().unwrap(),
+        "drop -f webp and use -o code.svg or -o code.pdf for a scalable image"
+    );
+}
+
+#[test]
+fn data_uri_files_are_named_for_the_uri_not_the_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    // .txt, unknown and missing extensions hold the default SVG URI quietly.
+    for name in ["uri.txt", "uri.html", "uri"] {
+        let p = path(name);
+        let (plan, err) = resolve(&["--data-uri", "-o", &p, "x"], false);
+        assert_eq!(plan.unwrap().format, DATA_URI_DEFAULT_FORMAT, "{name}");
+        assert_eq!(err, "", "{name}");
+    }
+    let p = path("uri.txt");
+    let (plan, err) = resolve(&["--data-uri", "-f", "eps", "-o", &p, "x"], false);
+    assert_eq!(
+        (plan.unwrap().format, err.as_str()),
+        (OutputFormat::Eps, "")
+    );
+
+    // An image extension: that image, with a warning that the file is not one.
+    for (argv, format) in [
+        (vec!["--data-uri", "-o", "code.svg"], OutputFormat::Svg),
+        (vec!["--data-uri", "-o", "code.pdf"], OutputFormat::Pdf),
+        (
+            vec!["--data-uri", "-f", "svg", "-o", "code.eps"],
+            OutputFormat::Svg,
+        ),
+    ] {
+        let mut argv: Vec<String> = argv.into_iter().map(str::to_owned).collect();
+        let last = argv.len() - 1;
+        argv[last] = path(&argv[last]);
+        argv.push("x".to_owned());
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let (plan, err) = resolve(&argv, false);
+        assert_eq!(plan.unwrap().format, format, "{argv:?}");
+        assert!(
+            err.starts_with("warning: writing a data: URI to '")
+                && err.contains("which will not be a valid")
+                && err.ends_with("  hint: use -o code.txt, or drop --data-uri\n"),
+            "{err}"
+        );
+    }
+
+    // A text format is still refused, whatever the extension.
+    let p = path("uri.txt");
+    let err = error(&["--data-uri", "-f", "text", "-o", &p, "x"], false);
+    assert!(matches!(
+        err,
+        CliError::DataUriNeedsImage(OutputFormat::Text)
+    ));
+}
+
+#[test]
+fn no_clobber_to_stdout_warns_that_it_does_nothing() {
+    let (plan, err) = resolve(&["--no-clobber", "-o", "-", "x"], false);
+    assert!(plan.unwrap().no_clobber);
+    assert_eq!(
+        err,
+        "warning: --no-clobber has no effect when writing to stdout\n"
+    );
 }
 
 #[test]
@@ -168,11 +261,14 @@ fn file_targets_are_prechecked() {
     assert_eq!(err.code(), "output_exists");
     assert_ne!(plan(&["-o", existing, "x"], false).target, Target::Stdout);
 
+    // A directory is reported as one, even when its name has no extension.
     let as_dir = dir.path().join("d.svg");
     fs::create_dir(&as_dir).unwrap();
-    let err = error(&["-o", as_dir.to_str().unwrap(), "x"], false);
-    assert!(err.to_string().ends_with("': it is a directory"), "{err}");
-    assert_eq!(err.exit_status(), ExitStatus::Io);
+    for d in [as_dir.to_str().unwrap(), dir.path().to_str().unwrap(), "."] {
+        let err = error(&["-o", d, "x"], false);
+        assert!(err.to_string().ends_with("': it is a directory"), "{err}");
+        assert_eq!(err.exit_status(), ExitStatus::Io);
+    }
 }
 
 #[test]
@@ -194,7 +290,6 @@ fn a_format_that_contradicts_the_extension_is_used_with_a_warning() {
         vec!["-f", "pdf", "-o", path, "x"],
         vec!["-f", "ascii", "-o", txt.to_str().unwrap(), "x"],
         vec!["-f", "svg", "-o", bare.to_str().unwrap(), "x"],
-        vec!["-f", "svg", "--data-uri", "-o", path, "x"],
     ] {
         let (plan, err) = resolve(&argv, false);
         assert!(plan.is_ok(), "{argv:?}");
@@ -277,6 +372,20 @@ fn write_errors_convert_to_cli_errors() {
         error: io::ErrorKind::PermissionDenied.into(),
     }
     .into();
-    assert_eq!(denied.hint(), None);
+    assert_eq!(
+        denied.hint().unwrap(),
+        "check that you can write to the directory (use -o - for stdout)"
+    );
     assert_eq!(denied.code(), "write_failed");
+    let fifo: CliError = WriteError::NotAFile("p".into()).into();
+    assert_eq!(fifo.to_string(), "output path 'p' is not a regular file");
+    assert_eq!(fifo.code(), "output_not_a_file");
+    assert_eq!(fifo.exit_status(), ExitStatus::Io);
+    assert!(fifo.hint().unwrap().contains("-o -"));
+    let other: CliError = WriteError::Io {
+        path: "a".into(),
+        error: io::Error::other("x"),
+    }
+    .into();
+    assert_eq!(other.hint(), None);
 }

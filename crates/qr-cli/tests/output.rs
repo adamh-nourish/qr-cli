@@ -131,9 +131,56 @@ fn raster_formats_are_a_clear_usage_error_for_now() {
                  hint: use -f svg or -f pdf for a scalable image\n"
             ));
     }
-    let path = dir.path().join("code.png");
-    qr().arg("hello").arg("-o").arg(&path).assert().code(2);
-    assert!(!path.exists());
+    // For a file, the hint names files, so following it never leaves SVG
+    // bytes in a .png file.
+    qr().current_dir(dir.path())
+        .args(["hello", "-o", "code.png"])
+        .assert()
+        .code(2)
+        .stderr(
+            "error: png output is not supported yet\n  \
+             hint: use -o code.svg or -o code.pdf for a scalable image\n",
+        );
+    assert_eq!(leftovers(dir.path(), &[]), Vec::<String>::new());
+}
+
+#[cfg(unix)]
+#[test]
+fn overwriting_a_private_file_keeps_it_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keep.svg");
+    fs::write(&path, "old").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    qr().arg("hello").arg("-o").arg(&path).assert().success();
+    assert!(fs::read_to_string(&path).unwrap().contains("<svg"));
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_not_replaced() {
+    use std::os::unix::fs::FileTypeExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe.svg");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    qr().arg("hello")
+        .arg("-o")
+        .arg(&fifo)
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("is not a regular file"))
+        .stderr(predicate::str::contains("use -o - for stdout"));
+    assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
 }
 
 #[test]
@@ -298,6 +345,95 @@ fn data_uri_wraps_the_image_in_base64() {
         .stderr(predicate::str::contains(
             "--data-uri needs an image format, not text",
         ));
+}
+
+#[test]
+fn data_uri_into_a_txt_file_needs_no_format() {
+    let svg = qr().args(["-f", "svg", "hello"]).output().unwrap().stdout;
+    let expected = format!(
+        "data:image/svg+xml;base64,{}\n",
+        qr_cli::output::base64(&svg)
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("uri.txt");
+    qr().args(["hello", "--data-uri", "-o"])
+        .arg(&path)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+}
+
+#[test]
+fn data_uri_into_an_image_file_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("code.svg");
+    qr().args(["hello", "--data-uri", "-o"])
+        .arg(&path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "which will not be a valid svg file",
+        ))
+        .stderr(predicate::str::contains(
+            "hint: use -o code.txt, or drop --data-uri",
+        ));
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("data:image/svg+xml;base64,")
+    );
+
+    // The warning has a stable code in --json mode.
+    let out = qr()
+        .args(["hello", "--data-uri", "--json", "-o"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(v["warning"]["code"], "data_uri_in_image_file");
+}
+
+#[test]
+fn no_clobber_to_stdout_warns() {
+    qr().args(["hello", "--no-clobber", "-o", "-"])
+        .assert()
+        .success()
+        .stderr("warning: --no-clobber has no effect when writing to stdout\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn json_escapes_terminal_controls_in_the_output_path() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    // CSI (C1), DEL and a right-to-left override in a file name.
+    let name = "a\u{9b}31m\u{7f}\u{202e}gvs.svg";
+    let path = dir.path().join(name);
+    let out = qr()
+        .args(["hello", "--json", "-o"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = std::str::from_utf8(&out.stdout).unwrap();
+    assert!(
+        !text
+            .chars()
+            .any(|c| matches!(c, '\u{7f}'..='\u{9f}' | '\u{202a}'..='\u{202e}')),
+        "{text:?}"
+    );
+    assert!(
+        text.contains("\\u009b") && text.contains("\\u202e"),
+        "{text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        v["output"].as_str().unwrap().as_bytes(),
+        path.as_os_str().as_bytes()
+    );
+    assert!(path.exists());
 }
 
 #[test]

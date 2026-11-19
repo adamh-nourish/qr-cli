@@ -15,7 +15,11 @@ use predicates::prelude::*;
 /// cannot change the output.
 fn qr() -> Command {
     let mut cmd = cargo_bin_cmd!("qr");
-    cmd.env_remove("NO_COLOR").env_remove("CLICOLOR_FORCE");
+    // clap wraps help to $COLUMNS when stdout is not a terminal, and 0
+    // disables wrapping, so the help snapshot pins it.
+    cmd.env_remove("NO_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("COLUMNS", "100");
     cmd
 }
 

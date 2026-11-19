@@ -6,7 +6,11 @@
 //! whether stderr is a terminal.
 //!
 //! With `--json`, each diagnostic is instead one line of JSON keyed by its
-//! kind, such as `{"error":{"code":"...","message":"...","hint":"..."}}`.
+//! kind, such as `{"warning":{"code":"...","message":"...","hint":"..."}}`.
+//! Every error, warning and note has a stable `code`. JSON text is not
+//! sanitised but escaped by [`json::object`], which writes every control
+//! and bidi character as `\uXXXX`: nothing reaches the terminal raw, and a
+//! consumer gets back the exact text, such as a file name.
 
 use std::io::Write;
 
@@ -97,47 +101,41 @@ impl<'a> Reporter<'a> {
 
     /// Reports an error, always. `code` is the stable name `--json` shows.
     pub fn error(&mut self, code: &str, message: &str, hint: Option<&str>) {
-        self.emit(ERROR, "error", Some(code), message, hint);
+        self.emit(ERROR, "error", code, message, hint);
     }
 
-    /// Reports a warning unless `-q` was given.
-    pub fn warn(&mut self, message: &str, hint: Option<&str>) {
+    /// Reports a warning unless `-q` was given. `code` is the stable name
+    /// `--json` shows.
+    pub fn warn(&mut self, code: &str, message: &str, hint: Option<&str>) {
         if self.verbosity != Verbosity::Quiet {
-            self.emit(WARNING, "warning", None, message, hint);
+            self.emit(WARNING, "warning", code, message, hint);
         }
     }
 
-    /// Reports a detail only when `-v` was given.
-    pub fn note(&mut self, message: &str) {
+    /// Reports a detail only when `-v` was given. `code` is the stable name
+    /// `--json` shows.
+    pub fn note(&mut self, code: &str, message: &str) {
         if self.verbosity == Verbosity::Verbose {
-            self.emit(NOTE, "note", None, message, None);
+            self.emit(NOTE, "note", code, message, None);
         }
     }
 
-    fn emit(
-        &mut self,
-        style: Style,
-        label: &str,
-        code: Option<&str>,
-        message: &str,
-        hint: Option<&str>,
-    ) {
-        // JSON escapes C0 controls but not C1 or bidi overrides, so the text
-        // is sanitised either way.
-        let message = sanitize_for_terminal(message);
-        let hint = hint.map(sanitize_for_terminal);
+    fn emit(&mut self, style: Style, label: &str, code: &str, message: &str, hint: Option<&str>) {
         if self.json {
+            // `json::keyed` escapes controls and bidi characters losslessly.
             let line = json::keyed(
                 label,
                 &Diagnostic {
                     code,
-                    message: &message,
-                    hint: hint.as_deref(),
+                    message,
+                    hint,
                 },
             );
             let _ = self.stderr.write_all(line.as_bytes());
             return;
         }
+        let message = sanitize_for_terminal(message);
+        let hint = hint.map(sanitize_for_terminal);
         let _ = writeln!(self.stderr, "{}: {message}", self.paint(style, label));
         if let Some(hint) = hint {
             let _ = writeln!(self.stderr, "  {}: {hint}", self.paint(HINT, "hint"));
@@ -198,8 +196,8 @@ mod tests {
         let mut buf = Vec::new();
         let mut r = Reporter::new(&mut buf, color, verbosity);
         r.error("usage", "bad \x1b[2J thing", Some("try \u{202e}this"));
-        r.warn("careful", None);
-        r.note("detail");
+        r.warn("careful_now", "careful", None);
+        r.note("detail_note", "detail");
         String::from_utf8(buf).unwrap()
     }
 
@@ -220,19 +218,25 @@ mod tests {
     fn json_mode_writes_one_object_per_line_and_never_colours() {
         let mut buf = Vec::new();
         let mut r = Reporter::new(&mut buf, true, Verbosity::Verbose).with_json(true);
-        r.error("usage", "bad \x1b[2J \u{202e}thing", Some("hint"));
-        r.warn("careful", None);
-        r.note("detail");
+        r.error("usage", "bad \x1b[2J \u{202e}thing\u{9b}", Some("hint"));
+        r.warn("careful_now", "careful", None);
+        r.note("detail_note", "detail");
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(
             out,
-            "{\"error\":{\"code\":\"usage\",\"message\":\"bad \\\\u{1b}[2J \\\\u{202e}thing\",\"hint\":\"hint\"}}\n\
-             {\"warning\":{\"message\":\"careful\"}}\n\
-             {\"note\":{\"message\":\"detail\"}}\n"
+            "{\"error\":{\"code\":\"usage\",\"message\":\"bad \\u001b[2J \\u202ething\\u009b\",\"hint\":\"hint\"}}\n\
+             {\"warning\":{\"code\":\"careful_now\",\"message\":\"careful\"}}\n\
+             {\"note\":{\"code\":\"detail_note\",\"message\":\"detail\"}}\n"
         );
-        for line in out.lines() {
-            serde_json::from_str::<serde_json::Value>(line).unwrap();
-        }
+        let lines: Vec<serde_json::Value> = out
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // Escaped, not sanitised: the exact text comes back.
+        assert_eq!(
+            lines[0]["error"]["message"],
+            "bad \x1b[2J \u{202e}thing\u{9b}"
+        );
     }
 
     #[test]

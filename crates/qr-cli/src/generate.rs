@@ -48,10 +48,11 @@ impl Generate<'_, '_> {
         };
         let input = read_input(&request, stdin, env.stdin_is_tty)?;
         let code = encode(&input.data, &encode_options(args))?;
-        reporter.note(&describe(&input, &code));
+        reporter.note("encoded", &describe(&input, &code));
 
         if usize::from(args.margin) < DEFAULT_MARGIN {
             reporter.warn(
+                "margin_below_quiet_zone",
                 &format!(
                     "a margin of {} is below the {DEFAULT_MARGIN}-module quiet zone \
                      the standard requires; some scanners may fail",
@@ -74,6 +75,7 @@ impl Generate<'_, '_> {
                 })?;
                 if plan.format == OutputFormat::Terminal && !enabled && plan.is_stdout() {
                     reporter.note(
+                        "colour_off",
                         "colour is off, so the code is drawn in the terminal's own colours; \
                          if it looks reversed, add --invert",
                     );
@@ -89,7 +91,12 @@ impl Generate<'_, '_> {
                 render_text(code.matrix(), text_format, &options).into_bytes()
             }
             // `Plan::resolve` refuses formats without a renderer.
-            Renderer::Raster => return Err(CliError::UnsupportedFormat(plan.format)),
+            Renderer::Raster => {
+                return Err(CliError::Internal(format!(
+                    "no renderer for {}",
+                    plan.format.name()
+                )));
+            }
         };
 
         let delivered = plan.deliver(rendered, stdout)?;
@@ -134,8 +141,14 @@ fn warn_unused_image_flags(args: &GenerateArgs, reporter: &mut Reporter<'_>) {
     .filter_map(|(set, flag)| set.then_some(flag))
     .collect();
     if !unused.is_empty() {
+        let verb = if unused.len() == 1 {
+            "applies"
+        } else {
+            "apply"
+        };
         reporter.warn(
-            &format!("{} only applies to image formats", unused.join(", ")),
+            "image_flags_ignored",
+            &format!("{} only {verb} to image formats", unused.join(", ")),
             Some("add -f svg or -o code.svg"),
         );
     }
@@ -202,6 +215,7 @@ fn check_width(
     let needed = format.columns(matrix, options);
     if needed > available {
         reporter.warn(
+            "terminal_too_narrow",
             &format!(
                 "the code is {needed} columns wide but the terminal has {available}; \
                  it will wrap and not scan"

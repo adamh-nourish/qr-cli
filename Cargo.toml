@@ -12,7 +12,7 @@ publish = false
 
 [workspace.dependencies]
 qr-core = { path = "crates/qr-core", version = "0.1.0" }
-clap = { version = "4.5", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+clap = { version = "4.5", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions", "wrap_help"] }
 clap_complete = "4.5"
 clap_mangen = "0.3"
 anstyle = "1"

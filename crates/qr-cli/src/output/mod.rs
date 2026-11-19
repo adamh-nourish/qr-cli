@@ -7,7 +7,10 @@
 //!
 //! Format resolution follows DECISIONS section 2: `-f` first, then the `-o`
 //! extension, then `terminal` when stdout is a terminal, otherwise `text`.
-//! `--data-uri` with nothing else to go on picks `svg`.
+//! `--data-uri` with nothing else to go on picks `svg`. With `--data-uri`
+//! and `-o`, the file holds the URI: a `.txt` (or unknown) extension keeps
+//! the `svg` default, and an image extension, which would leave a file that
+//! is not that image, is used with a warning.
 
 mod data_uri;
 mod format;
@@ -86,8 +89,18 @@ impl Plan {
         reporter: &mut Reporter<'_>,
     ) -> Result<Self, CliError> {
         let target = Target::from_arg(args.output.as_deref());
+        // A directory (or a FIFO, device or socket) is reported as such,
+        // before its name is read for a format.
+        if let Target::File(path) = &target {
+            precheck(path, args.no_clobber)?;
+        }
         let format = match (args.format, &target) {
             (Some(format), _) => format,
+            // With --data-uri the file holds the URI, so its extension names
+            // the container (.txt, say), not necessarily the image format.
+            (None, Target::File(path)) if args.data_uri => OutputFormat::from_path(path)
+                .filter(|f| f.is_image())
+                .unwrap_or(DATA_URI_DEFAULT_FORMAT),
             (None, Target::File(path)) => OutputFormat::from_path(path)
                 .ok_or_else(|| CliError::UnknownExtension(path.clone()))?,
             (None, Target::Stdout) if args.data_uri => DATA_URI_DEFAULT_FORMAT,
@@ -96,7 +109,14 @@ impl Plan {
         };
 
         if format.renderer() == Renderer::Raster {
-            return Err(CliError::UnsupportedFormat(format));
+            return Err(CliError::UnsupportedFormat {
+                format,
+                file: match &target {
+                    Target::File(path) if !args.data_uri => Some(path.clone()),
+                    Target::File(_) | Target::Stdout => None,
+                },
+                flag: args.format.is_some(),
+            });
         }
         if args.data_uri && !format.is_image() {
             return Err(CliError::DataUriNeedsImage(format));
@@ -109,10 +129,17 @@ impl Plan {
                 if stdout_is_tty && format.is_binary() && !args.data_uri {
                     return Err(CliError::BinaryToTerminal(format));
                 }
+                if args.no_clobber {
+                    reporter.warn(
+                        "no_clobber_ignored",
+                        "--no-clobber has no effect when writing to stdout",
+                        None,
+                    );
+                }
             }
+            Target::File(path) if args.data_uri => warn_on_uri_in_image_file(path, reporter),
             Target::File(path) => {
-                precheck(path, args.no_clobber)?;
-                if args.format.is_some() && !args.data_uri {
+                if args.format.is_some() {
                     warn_on_extension_mismatch(path, format, reporter);
                 }
             }
@@ -181,6 +208,7 @@ fn warn_on_extension_mismatch(path: &Path, format: OutputFormat, reporter: &mut 
         implied == format || (implied == OutputFormat::Text && format.renderer() == Renderer::Text);
     if !same {
         reporter.warn(
+            "extension_mismatch",
             &format!(
                 "writing {} to '{}', whose extension suggests {}",
                 format.name(),
@@ -188,6 +216,23 @@ fn warn_on_extension_mismatch(path: &Path, format: OutputFormat, reporter: &mut 
                 implied.name()
             ),
             Some("drop -f to use the format the extension names"),
+        );
+    }
+}
+
+/// Warns when `--data-uri` is written to a file whose extension names an
+/// image format, as in `--data-uri -o code.svg`: the file holds a `data:`
+/// URI, which no image viewer opens.
+fn warn_on_uri_in_image_file(path: &Path, reporter: &mut Reporter<'_>) {
+    if let Some(implied) = OutputFormat::from_path(path).filter(|f| f.is_image()) {
+        reporter.warn(
+            "data_uri_in_image_file",
+            &format!(
+                "writing a data: URI to '{}', which will not be a valid {} file",
+                path.display(),
+                implied.name()
+            ),
+            Some("use -o code.txt, or drop --data-uri"),
         );
     }
 }

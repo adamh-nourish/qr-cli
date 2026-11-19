@@ -677,12 +677,17 @@ fn image_flags_on_text_output_are_reported_as_unused() {
     assert_eq!(o.status, ExitStatus::Success);
     assert!(
         o.err
-            .starts_with("warning: --scale, --fg, --transparent only applies to image formats"),
+            .starts_with("warning: --scale, --fg, --transparent only apply to image formats"),
         "{}",
         o.err
     );
     let o = run_piped(&["qr", "--bg", "red", "x"]);
-    assert!(o.err.starts_with("warning: --bg only"), "{}", o.err);
+    assert!(
+        o.err
+            .starts_with("warning: --bg only applies to image formats"),
+        "{}",
+        o.err
+    );
     assert_eq!(run_piped(&["qr", "-q", "--bg", "red", "x"]).err, "");
 }
 

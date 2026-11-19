@@ -7,6 +7,18 @@
 //! old file untouched. Renaming replaces a symlink at the destination rather
 //! than writing through it to the file it points at.
 //!
+//! Replacing an existing regular file keeps its permission bits, so a
+//! `chmod 600` output stays private (the owner and group are those of the
+//! process, as for any new file). Something that is neither a regular file,
+//! a symlink nor missing, such as a FIFO or a device, is refused rather than
+//! replaced: `-o -` is the way to write to stdout, and `-o /dev/stdout`
+//! fails because the temporary file cannot be created in `/dev`.
+//!
+//! If the process dies between creating the temporary file and renaming it
+//! (a panic under `panic = "abort"`, or SIGINT or SIGKILL), a `.qr-*.tmp`
+//! file is left in the destination directory. The destination itself is
+//! never partially written.
+//!
 //! With `no_clobber` the final step refuses to replace anything
 //! ([`tempfile::NamedTempFile::persist_noclobber`]), which closes the window
 //! between an existence check and the write.
@@ -23,6 +35,10 @@ pub enum WriteError {
     /// `no_clobber` was set and something already exists at the path.
     #[error("'{}' already exists", .0.display())]
     Exists(PathBuf),
+    /// The path exists but is not a regular file, a symlink or a directory
+    /// (a FIFO, a device or a socket), which an atomic write would replace.
+    #[error("'{}' is not a regular file", .0.display())]
+    NotAFile(PathBuf),
     /// Creating, writing or renaming the file failed.
     #[error("cannot write '{}'", .path.display())]
     Io {
@@ -35,18 +51,23 @@ pub enum WriteError {
 }
 
 /// Checks, before any work is done, that `path` can plausibly be written:
-/// it must not be a directory, and with `no_clobber` nothing may exist there
-/// (a dangling symlink counts). The write itself checks again atomically.
+/// it must not be a directory or another non-file such as a FIFO, and with
+/// `no_clobber` nothing may exist there (a dangling symlink counts). The
+/// write itself checks again atomically.
 ///
 /// # Errors
 ///
-/// [`WriteError::Exists`] or an [`io::ErrorKind::IsADirectory`] error.
+/// [`WriteError::Exists`], [`WriteError::NotAFile`] or an
+/// [`io::ErrorKind::IsADirectory`] error.
 pub fn precheck(path: &Path, no_clobber: bool) -> Result<(), WriteError> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => Err(WriteError::Io {
             path: path.to_owned(),
             error: io::ErrorKind::IsADirectory.into(),
         }),
+        Ok(meta) if !meta.is_file() && !meta.is_symlink() => {
+            Err(WriteError::NotAFile(path.to_owned()))
+        }
         Ok(_) if no_clobber => Err(WriteError::Exists(path.to_owned())),
         Ok(_) | Err(_) => Ok(()),
     }
@@ -86,17 +107,32 @@ pub fn write_atomic(path: &Path, bytes: &[u8], no_clobber: bool) -> Result<(), W
 
 /// A new temporary file in the same directory as `path`, so the final
 /// rename never crosses a filesystem.
+///
+/// A new output file gets the usual 0666 less the umask, like any file a
+/// shell redirect creates (`tempfile`'s own default is 0600). When `path` is
+/// an existing regular file, the temporary file takes its permission bits
+/// before anything is written to it, so an overwrite never widens access.
 fn temp_file_beside(path: &Path) -> io::Result<NamedTempFile> {
     let mut builder = Builder::new();
     builder.prefix(".qr-").suffix(".tmp");
-    // The default is 0600 for temporary files. Output files get the usual
-    // 0666 less the umask, like any file a shell redirect creates.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         builder.permissions(fs::Permissions::from_mode(0o666));
     }
-    builder.tempfile_in(parent_dir(path))
+    let file = builder.tempfile_in(parent_dir(path))?;
+    #[cfg(unix)]
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            use std::os::unix::fs::PermissionsExt as _;
+            // Only the rwx bits: set-id bits are not carried over.
+            let mode = meta.permissions().mode() & 0o777;
+            file.as_file()
+                .set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        Ok(_) | Err(_) => {}
+    }
+    Ok(file)
 }
 
 /// The directory `path` is in: its parent, or `.` for a bare file name.
@@ -200,6 +236,67 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(fs::read(&link).unwrap(), b"new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwriting_keeps_the_existing_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        for wanted in [0o600, 0o640, 0o664, 0o400] {
+            let path = dir.path().join(format!("keep-{wanted:o}.svg"));
+            fs::write(&path, b"old").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(wanted)).unwrap();
+            write_atomic(&path, b"new", false).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"new");
+            assert_eq!(mode(&path), wanted, "{wanted:o}");
+        }
+        // Set-id bits are dropped rather than copied.
+        let path = dir.path().join("setuid.svg");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o4755)).unwrap();
+        write_atomic(&path, b"new", false).unwrap();
+        assert_eq!(mode(&path), 0o755);
+        assert_eq!(temp_files(dir.path()), Vec::<String>::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_does_not_lend_its_target_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"x").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("out.svg");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        write_atomic(&link, b"new", false).unwrap();
+        let plain = dir.path().join("plain");
+        fs::write(&plain, b"x").unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&link), mode(&plain));
+        assert_eq!(mode(&victim), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifos_are_refused_up_front() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.svg");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let err = precheck(&fifo, false).unwrap_err();
+        assert!(
+            matches!(&err, WriteError::NotAFile(p) if p == &fifo),
+            "{err}"
+        );
+        assert!(err.to_string().ends_with("' is not a regular file"));
+        assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
     }
 
     #[cfg(unix)]

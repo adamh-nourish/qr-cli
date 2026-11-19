@@ -61,8 +61,16 @@ pub enum CliError {
     UnknownExtension(PathBuf),
 
     /// The format is accepted by the parser but has no renderer yet.
-    #[error("{} output is not supported yet", .0.name())]
-    UnsupportedFormat(OutputFormat),
+    #[error("{} output is not supported yet", .format.name())]
+    UnsupportedFormat {
+        /// The format asked for.
+        format: OutputFormat,
+        /// The `-o` file whose name should change, when the image itself is
+        /// written there (not with `--data-uri`, where `-f` picks it).
+        file: Option<PathBuf>,
+        /// Whether the format came from `-f` rather than the extension.
+        flag: bool,
+    },
 
     /// Binary output was headed for a terminal.
     #[error("refusing to write binary {} output to a terminal", .0.name())]
@@ -83,6 +91,10 @@ pub enum CliError {
     /// `--no-clobber` and the output file exists.
     #[error("output file '{}' already exists", .0.display())]
     OutputExists(PathBuf),
+
+    /// The `-o` path is a FIFO, device or socket, not a file to replace.
+    #[error("output path '{}' is not a regular file", .0.display())]
+    OutputNotAFile(PathBuf),
 
     /// Creating or writing the output file failed.
     #[error("cannot write '{}': {}", .path.display(), io_reason(.error))]
@@ -107,7 +119,7 @@ impl CliError {
             | Self::EmptyInput { .. }
             | Self::Encode(EncodeError::InvalidCharacter { .. })
             | Self::UnknownExtension(_)
-            | Self::UnsupportedFormat(_)
+            | Self::UnsupportedFormat { .. }
             | Self::BinaryToTerminal(_)
             | Self::DataUriNeedsImage(_)
             | Self::JsonNeedsOutput(_)
@@ -118,6 +130,7 @@ impl CliError {
             Self::ReadInput { .. }
             | Self::Output(_)
             | Self::OutputExists(_)
+            | Self::OutputNotAFile(_)
             | Self::WriteFile { .. } => ExitStatus::Io,
             Self::Encode(_) | Self::Internal(_) => ExitStatus::Internal,
         }
@@ -135,12 +148,13 @@ impl CliError {
             Self::ReadInput { .. } => "read_failed",
             Self::Output(_) | Self::WriteFile { .. } => "write_failed",
             Self::UnknownExtension(_) => "unknown_extension",
-            Self::UnsupportedFormat(_) => "unsupported_format",
+            Self::UnsupportedFormat { .. } => "unsupported_format",
             Self::BinaryToTerminal(_) => "binary_to_terminal",
             Self::DataUriNeedsImage(_) => "data_uri_needs_image",
             Self::JsonNeedsOutput(_) => "json_needs_output",
             Self::Render(_) => "render_failed",
             Self::OutputExists(_) => "output_exists",
+            Self::OutputNotAFile(_) => "output_not_a_file",
             Self::Encode(_) | Self::Internal(_) => "internal",
         }
     }
@@ -174,8 +188,27 @@ impl CliError {
                 "pass -f FORMAT or use one of {}",
                 known_extensions()
             )),
-            Self::UnsupportedFormat(_) => {
+            // The hint must lead to a file whose name matches its content.
+            Self::UnsupportedFormat { file: None, .. } => {
                 Some("use -f svg or -f pdf for a scalable image".to_owned())
+            }
+            Self::UnsupportedFormat {
+                format,
+                file: Some(path),
+                flag,
+            } => {
+                let svg = path.with_extension("svg");
+                let pdf = path.with_extension("pdf");
+                let drop = if *flag {
+                    format!("drop -f {} and ", format.name())
+                } else {
+                    String::new()
+                };
+                Some(format!(
+                    "{drop}use -o {} or -o {} for a scalable image",
+                    svg.display(),
+                    pdf.display()
+                ))
             }
             Self::BinaryToTerminal(f) => Some(format!(
                 "redirect stdout to a file or use -o code.{}",
@@ -189,8 +222,14 @@ impl CliError {
             Self::OutputExists(_) => {
                 Some("remove it, choose another path or drop --no-clobber".to_owned())
             }
+            Self::OutputNotAFile(_) => {
+                Some("write to a regular file, or use -o - for stdout".to_owned())
+            }
             Self::WriteFile { error, .. } if error.kind() == io::ErrorKind::NotFound => {
                 Some("check that the directory exists".to_owned())
+            }
+            Self::WriteFile { error, .. } if error.kind() == io::ErrorKind::PermissionDenied => {
+                Some("check that you can write to the directory (use -o - for stdout)".to_owned())
             }
             // A render error's message already says what to change.
             Self::ReadInput { .. } | Self::Output(_) | Self::WriteFile { .. } | Self::Render(_) => {
@@ -204,6 +243,7 @@ impl From<WriteError> for CliError {
     fn from(err: WriteError) -> Self {
         match err {
             WriteError::Exists(path) => Self::OutputExists(path),
+            WriteError::NotAFile(path) => Self::OutputNotAFile(path),
             WriteError::Io { path, error } => Self::WriteFile { path, error },
         }
     }
@@ -319,9 +359,18 @@ mod tests {
                 "unknown_extension",
             ),
             (
-                CliError::UnsupportedFormat(OutputFormat::Png),
+                CliError::UnsupportedFormat {
+                    format: OutputFormat::Png,
+                    file: None,
+                    flag: true,
+                },
                 ExitStatus::Usage,
                 "unsupported_format",
+            ),
+            (
+                CliError::OutputNotAFile("p".into()),
+                ExitStatus::Io,
+                "output_not_a_file",
             ),
             (
                 CliError::BinaryToTerminal(OutputFormat::Pdf),
@@ -355,7 +404,12 @@ mod tests {
             (ExitStatus::Usage, "render_failed", None)
         );
         assert_eq!(
-            CliError::UnsupportedFormat(OutputFormat::Webp).to_string(),
+            CliError::UnsupportedFormat {
+                format: OutputFormat::Webp,
+                file: None,
+                flag: true
+            }
+            .to_string(),
             "webp output is not supported yet"
         );
     }

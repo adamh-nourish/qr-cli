@@ -3,6 +3,15 @@
 //!
 //! The field names are part of the CLI contract. New fields may be added;
 //! existing ones are not renamed or removed.
+//!
+//! Strings such as the `-o` path can hold any character, and stdout or
+//! stderr can be a terminal, so [`object`] writes every character a
+//! terminal would act on (C0 and C1 controls, DEL and the bidi controls
+//! that `sanitize_for_terminal` escapes) as a `\uXXXX` escape (DECISIONS
+//! section 4.5). The result is still plain JSON and decodes to the exact
+//! original text.
+
+use std::fmt::Write as _;
 
 use serde::Serialize;
 
@@ -36,9 +45,9 @@ pub struct Generated {
 /// `{"error":{"code":"...","message":"...","hint":"..."}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Diagnostic<'a> {
-    /// A stable identifier, for errors only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<&'a str>,
+    /// A stable identifier, such as `unknown_extension` for an error or
+    /// `extension_mismatch` for a warning.
+    pub code: &'a str,
     /// The human-readable message.
     pub message: &'a str,
     /// One actionable suggestion, if there is one.
@@ -46,16 +55,45 @@ pub struct Diagnostic<'a> {
     pub hint: Option<&'a str>,
 }
 
-/// Serialises `value` as one line of JSON, fields in declaration order.
+/// Serialises `value` as one line of JSON, fields in declaration order,
+/// with terminal controls escaped (see the module documentation).
 ///
 /// Serialising these plain structs cannot fail; if it ever did, an
 /// internal-error object takes its place.
 pub fn object<T: Serialize + ?Sized>(value: &T) -> String {
-    let mut out = serde_json::to_string(value).unwrap_or_else(|e| {
+    let text = serde_json::to_string(value).unwrap_or_else(|e| {
         serde_json::json!({ "code": "internal", "message": e.to_string() }).to_string()
     });
+    let mut out = escape_controls(&text);
     out.push('\n');
     out
+}
+
+/// Rewrites the characters `serde_json` leaves raw but a terminal acts on
+/// as `\uXXXX` escapes. JSON syntax outside strings is ASCII, so any such
+/// character is inside a string, where the escape means the same character.
+/// All of them are in the Basic Multilingual Plane, so one escape suffices.
+fn escape_controls(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if is_terminal_control(c) {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "\\u{:04x}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The characters `qr_core::sanitize_for_terminal` escapes (a test keeps
+/// the two in step): C0, DEL, C1 and the bidi controls.
+fn is_terminal_control(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
 }
 
 /// Serialises `value` as one line of JSON under the key `kind`.
@@ -86,7 +124,7 @@ mod tests {
     #[test]
     fn diagnostics_omit_empty_fields() {
         let d = Diagnostic {
-            code: Some("usage"),
+            code: "usage",
             message: "bad \"thing\"\n",
             hint: None,
         };
@@ -95,14 +133,55 @@ mod tests {
             "{\"error\":{\"code\":\"usage\",\"message\":\"bad \\\"thing\\\"\\n\"}}\n"
         );
         let w = Diagnostic {
-            code: None,
+            code: "w",
             message: "m",
             hint: Some("h"),
         };
         assert_eq!(
             keyed("warning", &w),
-            "{\"warning\":{\"message\":\"m\",\"hint\":\"h\"}}\n"
+            "{\"warning\":{\"code\":\"w\",\"message\":\"m\",\"hint\":\"h\"}}\n"
         );
+    }
+
+    #[test]
+    fn terminal_controls_are_escaped_losslessly() {
+        let nasty =
+            "a\u{1b}[2J\u{7f}\u{80}\u{9b}31m\u{9f}\u{202e}gpj.svg\u{2066}\u{61c}\u{200f}\n\té";
+        let g = Generated {
+            output: Some(nasty.into()),
+            format: "svg",
+            version: 1,
+            ec: "M".into(),
+            mode: "byte".into(),
+            mask: 0,
+            modules: 21,
+            bytes: 1,
+            written: 1,
+            data_uri: None,
+        };
+        let text = object(&g);
+        assert!(
+            !text[..text.len() - 1].chars().any(is_terminal_control),
+            "{text:?}"
+        );
+        for escape in [
+            "\\u007f", "\\u0080", "\\u009b", "\\u009f", "\\u202e", "\\u2066",
+        ] {
+            assert!(text.contains(escape), "{escape} in {text}");
+        }
+        // Ordinary non-ASCII text is left alone.
+        assert!(text.contains('é'));
+        let back: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back["output"], nasty);
+    }
+
+    #[test]
+    fn the_escaped_set_matches_the_terminal_sanitiser() {
+        for c in (0..=0x3000_u32).filter_map(char::from_u32) {
+            let s = c.to_string();
+            let sanitised = qr_core::sanitize_for_terminal(&s) != s;
+            assert_eq!(is_terminal_control(c), sanitised, "U+{:04X}", u32::from(c));
+        }
     }
 
     #[test]

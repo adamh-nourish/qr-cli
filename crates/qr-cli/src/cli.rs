@@ -25,7 +25,6 @@ const AFTER_HELP: &str = "\
 Examples:
   qr 'https://example.com'     Show a QR code in the terminal
   echo hello | qr              Encode stdin (one trailing newline is dropped)
-  qr -i payload.txt -f ascii   Encode a file as ASCII art
   qr 'hi' -o code.svg          Write an SVG file (format from the extension)
   qr 'hi' -f pdf -o - > c.pdf  Write a PDF to stdout
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
@@ -93,8 +92,9 @@ pub struct GenerateArgs {
     )]
     pub input: Option<PathBuf>,
 
-    /// Write the code to PATH ('-' for stdout). Existing files are replaced
-    /// atomically; a symlink is replaced, not followed.
+    /// Write the code to PATH ('-' for stdout, not /dev/stdout). Existing
+    /// files are replaced atomically and keep their permissions; a symlink
+    /// is replaced, not followed.
     #[arg(short = 'o', long = "output", value_name = "PATH|-")]
     pub output: Option<PathBuf>,
 
@@ -154,7 +154,8 @@ pub struct GenerateArgs {
     pub invert: bool,
 
     /// Print the image as a base64 data: URI instead of raw bytes
-    /// [default format: svg].
+    /// [default format: svg]. With -o, the file holds the URI: use a .txt
+    /// name.
     #[arg(long)]
     pub data_uri: bool,
 
