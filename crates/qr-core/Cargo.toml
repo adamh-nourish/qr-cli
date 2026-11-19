@@ -1,0 +1,12 @@
+[package]
+name = "qr-core"
+description = "Pure QR code encoding and rendering library used by the qr CLI (no I/O)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
