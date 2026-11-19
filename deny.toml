@@ -25,7 +25,12 @@ allow = [
     "Zlib",
     "Unicode-3.0",
 ]
-exceptions = []
+exceptions = [
+    # jpeg-encoder ports parts of libjpeg (DECISIONS section 1 picks it for
+    # JPEG output). The IJG licence is permissive but asks for credit in the
+    # documentation, so it is allowed for this one crate only.
+    { allow = ["IJG"], crate = "jpeg-encoder" },
+]
 # The allowlist is policy, not inventory: later PRs pull in BSD, ISC and Zlib crates.
 unused-allowed-license = "allow"
 

@@ -94,51 +94,29 @@ fn unknown_or_missing_extensions_are_usage_errors() {
 }
 
 #[test]
-fn raster_formats_are_not_supported_yet() {
-    for argv in [
-        &["-f", "png", "x"][..],
-        &["-f", "jpg", "x"],
-        &["-f", "webp", "-o", "-", "x"],
-        &["-o", "a.jpeg", "x"],
-        &["-o", "a.PNG", "x"],
-    ] {
-        let err = error(argv, false);
-        assert!(
-            matches!(err, CliError::UnsupportedFormat { .. }),
-            "{argv:?}"
-        );
-        assert_eq!(err.exit_status(), ExitStatus::Usage);
-        assert!(err.to_string().ends_with("output is not supported yet"));
+fn raster_formats_resolve_from_flags_and_extensions() {
+    use OutputFormat as F;
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    let (png, jpeg, upper) = (path("a.png"), path("a.jpeg"), path("a.PNG"));
+    let table: [(&[&str], F); 6] = [
+        (&["-f", "png", "x"], F::Png),
+        (&["-f", "jpg", "x"], F::Jpeg),
+        (&["-f", "webp", "-o", "-", "x"], F::Webp),
+        (&["-o", &jpeg, "x"], F::Jpeg),
+        (&["-o", &upper, "x"], F::Png),
+        (&["--data-uri", "-f", "png", "-o", &png, "x"], F::Png),
+    ];
+    for (argv, expected) in table {
+        assert_eq!(plan(argv, false).format, expected, "{argv:?}");
+        assert!(matches!(expected.renderer(), Renderer::Raster(_)));
     }
-}
-
-#[test]
-fn unsupported_format_hints_fit_the_target() {
-    // Stdout, or a data: URI (where -f picks the image): name a format.
-    for argv in [
-        &["-f", "png", "x"][..],
-        &["-f", "png", "--data-uri", "-o", "uri.txt", "x"],
-        &["--data-uri", "-o", "code.png", "x"],
-    ] {
-        let err = error(argv, false);
-        assert_eq!(
-            err.hint().unwrap(),
-            "use -f svg or -f pdf for a scalable image",
-            "{argv:?}"
-        );
-    }
-    // A file named for the format: name a file, so following the hint
-    // never leaves SVG bytes in a .png file.
-    let err = error(&["-o", "out/code.png", "x"], false);
-    assert_eq!(
-        err.hint().unwrap(),
-        "use -o out/code.svg or -o out/code.pdf for a scalable image"
-    );
-    let err = error(&["-f", "webp", "-o", "code.png", "x"], false);
-    assert_eq!(
-        err.hint().unwrap(),
-        "drop -f webp and use -o code.svg or -o code.pdf for a scalable image"
-    );
+    // A data: URI of a PNG is text, so it may go to a terminal.
+    assert_eq!(plan(&["--data-uri", "-f", "png", "x"], true).format, F::Png);
+    assert!(matches!(
+        error(&["-f", "png", "x"], true),
+        CliError::BinaryToTerminal(F::Png)
+    ));
 }
 
 #[test]

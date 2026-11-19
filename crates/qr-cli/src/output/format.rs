@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use qr_core::{TextFormat, VectorFormat};
+use qr_core::{RasterFormat, TextFormat, VectorFormat};
 
 use crate::cli::OutputFormat;
 
@@ -15,8 +15,8 @@ pub enum Renderer {
     Text,
     /// One of the vector renderers.
     Vector(VectorFormat),
-    /// A raster renderer (PNG, JPEG, WebP), which later changes add.
-    Raster,
+    /// One of the raster renderers.
+    Raster(RasterFormat),
 }
 
 /// Extensions recognised by `-o` inference, lower case, without the dot.
@@ -54,7 +54,9 @@ impl OutputFormat {
             Self::Svg => Renderer::Vector(VectorFormat::Svg),
             Self::Pdf => Renderer::Vector(VectorFormat::Pdf),
             Self::Eps => Renderer::Vector(VectorFormat::Eps),
-            Self::Png | Self::Jpeg | Self::Webp => Renderer::Raster,
+            Self::Png => Renderer::Raster(RasterFormat::Png),
+            Self::Jpeg => Renderer::Raster(RasterFormat::Jpeg),
+            Self::Webp => Renderer::Raster(RasterFormat::Webp),
         }
     }
 
@@ -74,9 +76,9 @@ impl OutputFormat {
     /// The IANA media type of an image format, for `--data-uri`.
     pub const fn media_type(self) -> Option<&'static str> {
         match self {
-            Self::Png => Some("image/png"),
-            Self::Jpeg => Some("image/jpeg"),
-            Self::Webp => Some("image/webp"),
+            Self::Png => Some(RasterFormat::Png.media_type()),
+            Self::Jpeg => Some(RasterFormat::Jpeg.media_type()),
+            Self::Webp => Some(RasterFormat::Webp.media_type()),
             Self::Svg => Some(VectorFormat::Svg.media_type()),
             Self::Pdf => Some(VectorFormat::Pdf.media_type()),
             Self::Eps => Some(VectorFormat::Eps.media_type()),
@@ -169,9 +171,24 @@ mod tests {
             (F::Terminal, Renderer::Text, false, None),
             (F::Text, Renderer::Text, false, None),
             (F::Ascii, Renderer::Text, false, None),
-            (F::Png, Renderer::Raster, true, Some("image/png")),
-            (F::Jpeg, Renderer::Raster, true, Some("image/jpeg")),
-            (F::Webp, Renderer::Raster, true, Some("image/webp")),
+            (
+                F::Png,
+                Renderer::Raster(RasterFormat::Png),
+                true,
+                Some("image/png"),
+            ),
+            (
+                F::Jpeg,
+                Renderer::Raster(RasterFormat::Jpeg),
+                true,
+                Some("image/jpeg"),
+            ),
+            (
+                F::Webp,
+                Renderer::Raster(RasterFormat::Webp),
+                true,
+                Some("image/webp"),
+            ),
             (
                 F::Svg,
                 Renderer::Vector(VectorFormat::Svg),

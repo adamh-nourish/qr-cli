@@ -14,6 +14,11 @@ workspace = true
 [dependencies]
 fast_qr.workspace = true
 thiserror.workspace = true
+# Raster output (DECISIONS section 1): 1-bit/indexed or RGBA PNG, baseline
+# JPEG and, through `image` with only its WebP codec, lossless WebP.
+png.workspace = true
+jpeg-encoder.workspace = true
+image = { workspace = true, features = ["webp"] }
 
 [dev-dependencies]
 divan.workspace = true
@@ -22,9 +27,15 @@ insta.workspace = true
 # Reference encoder for differential tests and the capacity-table cross-check.
 qrcode.workspace = true
 rqrr.workspace = true
+# Decodes every raster format back to pixels for the rqrr round-trip tests.
+image = { workspace = true, features = ["png", "jpeg", "webp"] }
 # Parses every generated SVG in the output-safety tests.
 roxmltree.workspace = true
 
 [[bench]]
 name = "encode"
+harness = false
+
+[[bench]]
+name = "render"
 harness = false

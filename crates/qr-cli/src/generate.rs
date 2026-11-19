@@ -4,8 +4,8 @@ use std::io::{Read, Write};
 
 use qr_core::render::{DEFAULT_MARGIN, DEFAULT_SCALE};
 use qr_core::{
-    Color, EncodeOptions, Matrix, QrCode, RenderOptions, TextFormat, TextOptions, VersionChoice,
-    encode, render_text, render_vector,
+    Color, EncodeOptions, Matrix, QrCode, RasterFormat, RenderOptions, TextFormat, TextOptions,
+    VersionChoice, encode, render_raster, render_text, render_vector,
 };
 
 use crate::cli::{ColorChoice, GenerateArgs, OutputFormat};
@@ -63,7 +63,12 @@ impl Generate<'_, '_> {
         }
 
         let rendered = match plan.format.renderer() {
+            Renderer::Raster(format) => {
+                warn_lost_settings(args, plan.format, reporter);
+                render_raster(code.matrix(), format, &render_options(args))?
+            }
             Renderer::Vector(format) => {
+                warn_lost_settings(args, plan.format, reporter);
                 render_vector(code.matrix(), format, &render_options(args))?
             }
             Renderer::Text => {
@@ -89,13 +94,6 @@ impl Generate<'_, '_> {
                     check_width(code.matrix(), text_format, &options, env, reporter);
                 }
                 render_text(code.matrix(), text_format, &options).into_bytes()
-            }
-            // `Plan::resolve` refuses formats without a renderer.
-            Renderer::Raster => {
-                return Err(CliError::Internal(format!(
-                    "no renderer for {}",
-                    plan.format.name()
-                )));
             }
         };
 
@@ -123,6 +121,8 @@ fn render_options(args: &GenerateArgs) -> RenderOptions {
     RenderOptions::default()
         .with_margin(usize::from(args.margin))
         .with_scale(args.scale.unwrap_or(DEFAULT_SCALE))
+        .with_size(args.size)
+        .with_dpi(args.dpi)
         .with_fg(fg)
         .with_bg(bg)
         .with_transparent(args.transparent)
@@ -133,6 +133,8 @@ fn render_options(args: &GenerateArgs) -> RenderOptions {
 fn warn_unused_image_flags(args: &GenerateArgs, reporter: &mut Reporter<'_>) {
     let unused: Vec<&str> = [
         (args.scale.is_some(), "--scale"),
+        (args.size.is_some(), "--size"),
+        (args.dpi.is_some(), "--dpi"),
         (args.fg.is_some(), "--fg"),
         (args.bg.is_some(), "--bg"),
         (args.transparent, "--transparent"),
@@ -150,6 +152,40 @@ fn warn_unused_image_flags(args: &GenerateArgs, reporter: &mut Reporter<'_>) {
             "image_flags_ignored",
             &format!("{} only {verb} to image formats", unused.join(", ")),
             Some("add -f svg or -o code.svg"),
+        );
+    }
+}
+
+/// Warns about image settings `format` cannot keep: `--dpi` outside PNG
+/// and JPEG, and transparency in a JPEG.
+fn warn_lost_settings(args: &GenerateArgs, format: OutputFormat, reporter: &mut Reporter<'_>) {
+    let raster = match format.renderer() {
+        Renderer::Raster(raster) => Some(raster),
+        Renderer::Vector(_) | Renderer::Text => None,
+    };
+    if args.dpi.is_some() && !raster.is_some_and(RasterFormat::records_dpi) {
+        reporter.warn(
+            "dpi_ignored",
+            &format!("--dpi has no effect on {} output", format.name()),
+            Some(if raster.is_some() {
+                "use -f png or -f jpeg to record a pixel density"
+            } else {
+                "vector output has no pixels; set its size with --scale"
+            }),
+        );
+    }
+    let translucent = [args.fg, args.bg]
+        .into_iter()
+        .flatten()
+        .any(|c| !c.is_opaque());
+    if (args.transparent || translucent) && raster.is_some_and(|f| !f.has_alpha()) {
+        reporter.warn(
+            "transparency_flattened",
+            &format!(
+                "{} has no transparency, so the colours are flattened onto white",
+                format.name()
+            ),
+            Some("use -f png or -f webp to keep transparency"),
         );
     }
 }

@@ -1,5 +1,4 @@
-//! Options and errors shared by the graphical (vector and, later, raster)
-//! renderers.
+//! Options and errors shared by the graphical (vector and raster) renderers.
 
 use thiserror::Error;
 
@@ -17,6 +16,10 @@ pub const MAX_CANVAS_SIDE: u32 = 16_384;
 /// The longest document title accepted, in characters.
 pub const MAX_TITLE_CHARS: usize = 512;
 
+/// The largest pixel density accepted, in dots per inch. JPEG stores the
+/// density in 16 bits, so this is the most every format can record.
+pub const MAX_DPI: u32 = 65_535;
+
 /// A symbol could not be rendered with the given options.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RenderError {
@@ -25,7 +28,7 @@ pub enum RenderError {
     ZeroScale,
     /// The canvas would exceed the format's size limit.
     #[error(
-        "rendered size {side} exceeds the {max} limit for {format} (lower --scale or --margin)"
+        "rendered size {side} exceeds the {max} limit for {format} (lower --scale, --size or --margin)"
     )]
     TooLarge {
         /// The format being rendered, such as `svg`.
@@ -34,6 +37,56 @@ pub enum RenderError {
         side: u64,
         /// The largest side the format allows.
         max: u32,
+    },
+    /// The requested canvas size cannot hold one pixel (or point) per module.
+    #[error(
+        "size {size} is too small for {modules} modules including the margin (use at least {modules})"
+    )]
+    SizeTooSmall {
+        /// The requested canvas side.
+        size: u32,
+        /// The symbol plus quiet zone, in modules.
+        modules: u32,
+    },
+    /// The module size is below a format's minimum, as for JPEG, whose
+    /// compression blurs modules narrower than a few pixels.
+    #[error(
+        "{format} needs at least {min} pixels per module, got {scale} (raise --scale or --size)"
+    )]
+    ScaleTooSmall {
+        /// The format being rendered, such as `jpeg`.
+        format: &'static str,
+        /// The module size the options produce.
+        scale: u32,
+        /// The smallest module size the format allows.
+        min: u32,
+    },
+    /// The image would hold more pixels than any raster renderer draws.
+    #[error("rendered image of {pixels} pixels exceeds the {max} pixel limit for {format}")]
+    TooManyPixels {
+        /// The format being rendered, such as `png`.
+        format: &'static str,
+        /// The requested pixel count.
+        pixels: u64,
+        /// The largest pixel count allowed.
+        max: u64,
+    },
+    /// The pixel density is zero or above [`MAX_DPI`].
+    #[error("dpi {dpi} is out of range (expected 1 to {max})")]
+    DpiOutOfRange {
+        /// The requested density.
+        dpi: u32,
+        /// [`MAX_DPI`].
+        max: u32,
+    },
+    /// An image encoder failed. With valid options this is a bug or an
+    /// allocation failure, not a usage error.
+    #[error("cannot encode {format}: {message}")]
+    Encoder {
+        /// The format being encoded.
+        format: &'static str,
+        /// The encoder's own description of the failure.
+        message: String,
     },
     /// The document title is longer than [`MAX_TITLE_CHARS`].
     #[error("title is {chars} characters long (the limit is {max})")]
@@ -62,8 +115,17 @@ pub struct RenderOptions {
     /// Quiet zone around the symbol, in modules. Renderers clamp it to
     /// [`MAX_MARGIN`].
     pub margin: usize,
-    /// Size of one module: pixels for SVG, points for PDF and EPS.
+    /// Size of one module: pixels for SVG and raster images, points for PDF
+    /// and EPS. Ignored when [`Self::size`] is set.
     pub scale: u32,
+    /// Target canvas side instead of a module size. Raster images are
+    /// exactly this many pixels across: the largest whole module size that
+    /// fits is used and the remainder widens the quiet zone. Vector formats
+    /// use that same module size, so they are at most this size.
+    pub size: Option<u32>,
+    /// Pixel density recorded in raster metadata (PNG `pHYs`, JPEG JFIF
+    /// density). It does not change the pixels.
+    pub dpi: Option<u32>,
     /// Colour of dark modules.
     pub fg: Color,
     /// Colour of light modules and the quiet zone.
@@ -80,6 +142,8 @@ impl Default for RenderOptions {
         Self {
             margin: DEFAULT_MARGIN,
             scale: DEFAULT_SCALE,
+            size: None,
+            dpi: None,
             fg: Color::BLACK,
             bg: Color::WHITE,
             transparent: false,
@@ -101,6 +165,21 @@ impl RenderOptions {
     #[must_use]
     pub fn with_scale(mut self, scale: u32) -> Self {
         self.scale = scale;
+        self
+    }
+
+    /// Returns these options with a target canvas side (see [`Self::size`]),
+    /// or none to use [`Self::scale`].
+    #[must_use]
+    pub fn with_size(mut self, size: Option<u32>) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Returns these options with the given pixel density, or none.
+    #[must_use]
+    pub fn with_dpi(mut self, dpi: Option<u32>) -> Self {
+        self.dpi = dpi;
         self
     }
 
@@ -155,9 +234,6 @@ impl RenderOptions {
         format: &'static str,
         max_side: u32,
     ) -> Result<Layout, RenderError> {
-        if self.scale == 0 {
-            return Err(RenderError::ZeroScale);
-        }
         if let Some(title) = &self.title {
             let chars = title.chars().count();
             if chars > MAX_TITLE_CHARS {
@@ -177,7 +253,16 @@ impl RenderOptions {
             .ok()
             .and_then(|w| margin.checked_mul(2)?.checked_add(w))
             .ok_or_else(|| too_large(u64::MAX))?;
-        let side = u64::from(modules) * u64::from(self.scale);
+        let scale = match self.size {
+            // Whole pixels per module, so every module is the same size.
+            Some(size) => match size / modules {
+                0 => return Err(RenderError::SizeTooSmall { size, modules }),
+                scale => scale,
+            },
+            None if self.scale == 0 => return Err(RenderError::ZeroScale),
+            None => self.scale,
+        };
+        let side = u64::from(modules) * u64::from(scale);
         let side = u32::try_from(side)
             .ok()
             .filter(|s| *s <= max_side)
@@ -185,7 +270,7 @@ impl RenderOptions {
         Ok(Layout {
             margin,
             modules,
-            scale: self.scale,
+            scale,
             side,
         })
     }
@@ -219,6 +304,7 @@ mod tests {
         assert_eq!((o.margin, o.scale), (4, 10));
         assert_eq!((o.fg, o.bg), (Color::BLACK, Color::WHITE));
         assert!(!o.transparent && o.title.is_none());
+        assert_eq!((o.size, o.dpi), (None, None));
         assert_eq!(o.background(), Color::WHITE);
     }
 
@@ -227,12 +313,14 @@ mod tests {
         let o = RenderOptions::default()
             .with_margin(usize::MAX)
             .with_scale(3)
+            .with_size(Some(7))
+            .with_dpi(Some(300))
             .with_fg(Color::WHITE)
             .with_bg(Color::BLACK)
             .with_transparent(true)
             .with_title("t");
         assert_eq!(o.margin, MAX_MARGIN);
-        assert_eq!(o.scale, 3);
+        assert_eq!((o.scale, o.size, o.dpi), (3, Some(7), Some(300)));
         assert_eq!((o.fg, o.bg), (Color::WHITE, Color::BLACK));
         assert_eq!(o.background(), Color::TRANSPARENT);
         assert_eq!(o.title.as_deref(), Some("t"));
@@ -288,6 +376,40 @@ mod tests {
     }
 
     #[test]
+    fn size_picks_the_largest_whole_scale() {
+        let m = one_module(); // 9 modules with the default margin
+        let layout = |size| {
+            RenderOptions::default()
+                .with_size(Some(size))
+                .layout(&m, "svg", 100)
+        };
+        assert_eq!(layout(9).map(|l| (l.scale, l.side)), Ok((1, 9)));
+        assert_eq!(layout(26).map(|l| (l.scale, l.side)), Ok((2, 18)));
+        assert_eq!(layout(27).map(|l| (l.scale, l.side)), Ok((3, 27)));
+        assert_eq!(
+            layout(8),
+            Err(RenderError::SizeTooSmall {
+                size: 8,
+                modules: 9
+            })
+        );
+        assert_eq!(
+            layout(0),
+            Err(RenderError::SizeTooSmall {
+                size: 0,
+                modules: 9
+            })
+        );
+        // The size overrides even a zero scale.
+        let o = RenderOptions::default().with_scale(0).with_size(Some(18));
+        assert_eq!(o.layout(&m, "svg", 100).map(|l| l.scale), Ok(2));
+        assert!(matches!(
+            layout(200),
+            Err(RenderError::TooLarge { side: 198, .. })
+        ));
+    }
+
+    #[test]
     fn public_fields_are_clamped_too() {
         let o = RenderOptions {
             margin: usize::MAX,
@@ -330,7 +452,45 @@ mod tests {
                 max: 16_384
             }
             .to_string(),
-            "rendered size 20000 exceeds the 16384 limit for svg (lower --scale or --margin)"
+            "rendered size 20000 exceeds the 16384 limit for svg (lower --scale, --size or --margin)"
+        );
+        assert_eq!(
+            RenderError::SizeTooSmall {
+                size: 20,
+                modules: 29
+            }
+            .to_string(),
+            "size 20 is too small for 29 modules including the margin (use at least 29)"
+        );
+        assert_eq!(
+            RenderError::ScaleTooSmall {
+                format: "jpeg",
+                scale: 2,
+                min: 4
+            }
+            .to_string(),
+            "jpeg needs at least 4 pixels per module, got 2 (raise --scale or --size)"
+        );
+        assert_eq!(
+            RenderError::TooManyPixels {
+                format: "png",
+                pixels: 300,
+                max: 200
+            }
+            .to_string(),
+            "rendered image of 300 pixels exceeds the 200 pixel limit for png"
+        );
+        assert_eq!(
+            RenderError::DpiOutOfRange { dpi: 0, max: 9 }.to_string(),
+            "dpi 0 is out of range (expected 1 to 9)"
+        );
+        assert_eq!(
+            RenderError::Encoder {
+                format: "webp",
+                message: "boom".into()
+            }
+            .to_string(),
+            "cannot encode webp: boom"
         );
     }
 }
