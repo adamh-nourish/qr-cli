@@ -1,0 +1,11 @@
+# Normalise text to LF in the repo and in every checkout, so golden and
+# snapshot fixtures are byte-identical on Windows runners (core.autocrlf=true).
+* text=auto eol=lf
+
+# Binary fixtures: never normalise or diff.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.pdf  binary
+*.ico  binary

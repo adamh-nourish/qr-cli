@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+# Every `run:` step uses `bash --noprofile --norc -eo pipefail {0}` on all
+# OSes. Without this, Linux/macOS steps get `bash -e {0}` (no pipefail), so a
+# failing command piped into `tee` would leave the step green.
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -58,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -144,9 +151,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
         with:
-          command: check
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # install-action verifies the release checksum (cargo-deny-action's
+      # Docker image downloads its tarball without one).
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny
+      - run: cargo deny --locked check
 
   workflow-lint:
     name: Workflow lint
@@ -213,7 +226,10 @@ jobs:
             --export-json startup.json --export-markdown startup.md "$bin --version"
           # hyperfine 2.x nests stats under .summary; 1.x has a top-level .median.
           median_ms=$(jq '.results[0] | (.summary.time_wall_clock.median // .median) * 1000' startup.json)
-          test -n "$median_ms" && test "$median_ms" != null
+          if [[ ! $median_ms =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::could not read median startup time from hyperfine (got '${median_ms}')"
+            exit 1
+          fi
           {
             echo "### Startup"
             cat startup.md
