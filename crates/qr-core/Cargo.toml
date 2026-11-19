@@ -18,6 +18,7 @@ thiserror.workspace = true
 [dev-dependencies]
 divan.workspace = true
 proptest.workspace = true
+insta.workspace = true
 # Reference encoder for differential tests and the capacity-table cross-check.
 qrcode.workspace = true
 rqrr.workspace = true

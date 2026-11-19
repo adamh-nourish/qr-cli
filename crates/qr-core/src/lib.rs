@@ -1,8 +1,9 @@
 //! Core QR code library for the `qr` command-line tool.
 //!
 //! This crate is deliberately free of I/O. It holds the module [`Matrix`],
-//! the [`QrEncoder`] abstraction, exact [`capacity`] limits and, in later
-//! changes, payload builders, renderers and resource limits. The `qr-cli`
+//! the [`QrEncoder`] abstraction, exact [`capacity`] limits, the text
+//! [`render`]ers and [`sanitize_for_terminal`]. Later changes add payload
+//! builders, vector and raster renderers and resource limits. The `qr-cli`
 //! crate owns argument parsing, files, streams and exit codes.
 //!
 //! ```
@@ -21,6 +22,8 @@ mod encode;
 mod error;
 mod matrix;
 mod options;
+pub mod render;
+mod sanitize;
 
 pub use crate::capacity::max_chars;
 pub use crate::encode::{EncodePlan, FastQrEncoder, QrCode, QrEncoder, encode, plan};
@@ -29,6 +32,8 @@ pub use crate::matrix::{Matrix, MatrixError};
 pub use crate::options::{
     EcLevel, EncodeOptions, Mask, Mode, ModeChoice, OptionError, Version, VersionChoice,
 };
+pub use crate::render::{TextFormat, TextOptions, render_text};
+pub use crate::sanitize::{sanitize_for_terminal, sanitize_lines_for_terminal};
 
 /// Version of this crate, taken from its manifest at compile time.
 ///
