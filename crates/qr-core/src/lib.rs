@@ -2,9 +2,9 @@
 //!
 //! This crate is deliberately free of I/O. It holds the module [`Matrix`],
 //! the [`QrEncoder`] abstraction, exact [`capacity`] limits, the typed
-//! [`Color`], the text and vector (SVG, PDF, EPS) [`render`]ers and
-//! [`sanitize_for_terminal`]. Later changes add payload builders, raster
-//! renderers and resource limits. The `qr-cli`
+//! [`Color`], the text, vector (SVG, PDF, EPS) and raster (PNG, JPEG,
+//! WebP) [`render`]ers and [`sanitize_for_terminal`]. Later changes add
+//! payload builders and styling. The `qr-cli`
 //! crate owns argument parsing, files, streams and exit codes.
 //!
 //! ```
@@ -36,8 +36,9 @@ pub use crate::options::{
     EcLevel, EncodeOptions, Mask, Mode, ModeChoice, OptionError, Version, VersionChoice,
 };
 pub use crate::render::{
-    RenderError, RenderOptions, TextFormat, TextOptions, UnknownVectorFormat, VectorFormat,
-    render_eps, render_pdf, render_svg, render_text, render_vector,
+    RasterFormat, RenderError, RenderOptions, TextFormat, TextOptions, UnknownRasterFormat,
+    UnknownVectorFormat, VectorFormat, render_eps, render_jpeg, render_pdf, render_png,
+    render_raster, render_svg, render_text, render_vector, render_webp,
 };
 pub use crate::sanitize::{sanitize_for_terminal, sanitize_lines_for_terminal};
 

@@ -33,10 +33,10 @@ Options:
           - terminal: Unicode half blocks, forced black on white with ANSI colours
           - text:     Unicode half blocks with no escape sequences
           - ascii:    '##' and spaces, pure ASCII
-          - png:      PNG image (not supported yet)
+          - png:      PNG image (1-bit indexed, or RGBA when transparent)
           - svg:      Scalable Vector Graphics
-          - jpeg:     JPEG image (not supported yet)
-          - webp:     Lossless WebP image (not supported yet)
+          - jpeg:     JPEG image (quality 92; at least 4 pixels per module)
+          - webp:     Lossless WebP image
           - pdf:      One-page vector PDF
           - eps:      Encapsulated PostScript
 
@@ -62,7 +62,14 @@ Options:
           [default: 4]
 
       --scale <N>
-          Size of one module in pixels (SVG) or points (PDF, EPS) [default: 10]
+          Size of one module in pixels (PNG, JPEG, WebP, SVG) or points (PDF, EPS) [default: 10]
+
+      --size <PX>
+          Width and height of a PNG, JPEG or WebP image in pixels, with the largest whole module
+          size that fits (vector formats are at most this size)
+
+      --dpi <N>
+          Pixel density to record in a PNG or JPEG file, in dots per inch
 
       --fg <COLOR>
           Colour of dark modules: #RGB, #RRGGBB, #RRGGBBAA or a CSS name [default: black]
@@ -115,6 +122,7 @@ Examples:
   qr 'https://example.com'     Show a QR code in the terminal
   echo hello | qr              Encode stdin (one trailing newline is dropped)
   qr 'hi' -o code.svg          Write an SVG file (format from the extension)
+  qr 'hi' --size 512 -o c.png  Write a 512x512 PNG image
   qr 'hi' -f pdf -o - > c.pdf  Write a PDF to stdout
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr -- help                   Encode a word that is also a command name,

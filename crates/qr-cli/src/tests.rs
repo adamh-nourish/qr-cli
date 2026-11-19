@@ -703,6 +703,116 @@ fn oversized_renders_are_usage_errors() {
 }
 
 #[test]
+fn raster_formats_go_to_stdout_when_piped() {
+    let code = hello_matrix();
+    for format in qr_core::RasterFormat::ALL {
+        let name = format.extension();
+        let (status, out, err) = run_bytes(&["qr", "-f", name, "hello"], piped());
+        assert_eq!(status, ExitStatus::Success, "{name}: {err}");
+        assert_eq!(err, "");
+        let expected =
+            qr_core::render_raster(code.matrix(), format, &qr_core::RenderOptions::default())
+                .unwrap();
+        assert_eq!(out, expected, "{name}");
+    }
+}
+
+#[test]
+fn size_and_dpi_reach_the_raster_renderer() {
+    let code = hello_matrix();
+    let (status, out, err) = run_bytes(
+        &["qr", "-f", "png", "--size", "100", "--dpi", "300", "hello"],
+        piped(),
+    );
+    assert_eq!(status, ExitStatus::Success, "{err}");
+    let options = qr_core::RenderOptions::default()
+        .with_size(Some(100))
+        .with_dpi(Some(300));
+    assert_eq!(out, qr_core::render_png(code.matrix(), &options).unwrap());
+    // Vector formats take the size as an upper bound on whole modules.
+    let (status, out, _) = run_bytes(&["qr", "-f", "svg", "--size", "100", "hello"], piped());
+    assert_eq!(status, ExitStatus::Success);
+    assert!(String::from_utf8(out).unwrap().contains(r#"width="87""#));
+}
+
+#[test]
+fn settings_a_format_cannot_keep_are_reported() {
+    // (args, expected warning)
+    let table: [(&[&str], &str); 5] = [
+        (
+            &["qr", "-f", "webp", "--dpi", "300", "x"],
+            "warning: --dpi has no effect on webp output\n  \
+             hint: use -f png or -f jpeg to record a pixel density\n",
+        ),
+        (
+            &["qr", "-f", "pdf", "--dpi", "300", "x"],
+            "warning: --dpi has no effect on pdf output\n  \
+             hint: vector output has no pixels; set its size with --scale\n",
+        ),
+        (
+            &["qr", "-f", "jpeg", "--transparent", "x"],
+            "warning: jpeg has no transparency, so the colours are flattened onto white\n  \
+             hint: use -f png or -f webp to keep transparency\n",
+        ),
+        (
+            &["qr", "-f", "jpeg", "--fg", "#0008", "x"],
+            "warning: jpeg has no transparency, so the colours are flattened onto white\n  \
+             hint: use -f png or -f webp to keep transparency\n",
+        ),
+        (
+            &["qr", "--size", "100", "--dpi", "72", "x"],
+            "warning: --size, --dpi only apply to image formats\n  \
+             hint: add -f svg or -o code.svg\n",
+        ),
+    ];
+    for (args, expected) in table {
+        let (status, _, err) = run_bytes(args, piped());
+        assert_eq!(status, ExitStatus::Success, "{args:?}");
+        assert_eq!(err, expected, "{args:?}");
+    }
+    // Nothing to report when the format keeps the setting.
+    for args in [
+        &["qr", "-f", "png", "--dpi", "300", "--transparent", "x"][..],
+        &["qr", "-f", "jpeg", "--dpi", "300", "--fg", "navy", "x"],
+        &["qr", "-f", "webp", "--bg", "#fff0", "x"],
+    ] {
+        let (status, _, err) = run_bytes(args, piped());
+        assert_eq!(
+            (status, err.as_str()),
+            (ExitStatus::Success, ""),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn raster_limits_are_usage_errors() {
+    let cases: [(&[&str], &str); 3] = [
+        (
+            &["qr", "-f", "jpeg", "--scale", "3", "x"],
+            "error: jpeg needs at least 4 pixels per module, got 3 (raise --scale or --size)\n",
+        ),
+        (
+            &["qr", "-f", "png", "--size", "20", "x"],
+            "error: size 20 is too small for 29 modules including the margin (use at least 29)\n",
+        ),
+        (
+            &["qr", "-f", "png", "--scale", "560", "x"],
+            "error: rendered image of 263737600 pixels exceeds the 256000000 pixel limit for png\n",
+        ),
+    ];
+    for (args, expected) in cases {
+        let (status, out, err) = run_bytes(args, piped());
+        assert_eq!(status, ExitStatus::Usage, "{args:?}");
+        assert_eq!(
+            (out.as_slice(), err.as_str()),
+            (&b""[..], expected),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
 fn files_get_the_code_and_stdout_stays_empty() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("code.svg");

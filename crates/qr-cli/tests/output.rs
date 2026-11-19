@@ -114,34 +114,167 @@ fn unknown_extensions_are_usage_errors_and_create_nothing() {
     assert_eq!(leftovers(dir.path(), &[]), Vec::<String>::new());
 }
 
+/// Decodes the QR code in an image file's bytes, flattening any
+/// transparency onto white as a scanner would see it on a page.
+fn scan(bytes: &[u8]) -> String {
+    let img = image::load_from_memory(bytes).unwrap().to_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| {
+        let [red, green, blue, alpha] = img
+            .get_pixel(u32::try_from(x).unwrap(), u32::try_from(y).unwrap())
+            .0
+            .map(u32::from);
+        let luma = (299 * red + 587 * green + 114 * blue) / 1000;
+        u8::try_from((luma * alpha + 255 * (255 - alpha)) / 255).unwrap()
+    });
+    let grids = prepared.detect_grids();
+    assert_eq!(grids.len(), 1, "expected one symbol");
+    grids[0].decode().unwrap().1
+}
+
 #[test]
-fn raster_formats_are_a_clear_usage_error_for_now() {
+fn raster_files_decode_back_to_the_input() {
     let dir = tempfile::tempdir().unwrap();
-    for (args, name) in [
-        (&["-f", "png"][..], "png"),
-        (&["-f", "jpeg"], "jpeg"),
-        (&["-f", "webp"], "webp"),
-    ] {
-        qr().args(args)
-            .arg("hello")
+    let cases = [
+        ("code.png", &b"\x89PNG\r\n\x1a\n"[..]),
+        ("code.PNG", b"\x89PNG\r\n\x1a\n"),
+        ("code.jpg", b"\xff\xd8\xff"),
+        ("code.jpeg", b"\xff\xd8\xff"),
+        ("code.webp", b"RIFF"),
+    ];
+    for (name, magic) in cases {
+        let path = dir.path().join(name);
+        qr().args(["https://example.com/raster", "-o"])
+            .arg(&path)
             .assert()
-            .code(2)
-            .stderr(format!(
-                "error: {name} output is not supported yet\n  \
-                 hint: use -f svg or -f pdf for a scalable image\n"
-            ));
+            .success()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::is_empty());
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.starts_with(magic), "{name}");
+        assert_eq!(scan(&bytes), "https://example.com/raster", "{name}");
     }
-    // For a file, the hint names files, so following it never leaves SVG
-    // bytes in a .png file.
-    qr().current_dir(dir.path())
-        .args(["hello", "-o", "code.png"])
+    assert_eq!(
+        leftovers(
+            dir.path(),
+            &["code.png", "code.PNG", "code.jpg", "code.jpeg", "code.webp"]
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn styled_raster_output_decodes() {
+    for format in ["png", "jpeg", "webp"] {
+        for style in [
+            &["--fg", "#1a237e", "--bg", "ivory"][..],
+            &["--transparent", "--fg", "darkgreen"],
+            &["--invert"],
+            &["--size", "257", "--margin", "2"],
+        ] {
+            let out = qr()
+                .args(["-q", "-f", format, "styled"])
+                .args(style)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{format} {style:?}: {out:?}");
+            if style == ["--invert"] {
+                // rqrr reads dark modules as dark, so an inverted code is
+                // checked for its colours instead.
+                let img = image::load_from_memory(&out.stdout).unwrap().to_luma8();
+                assert!(
+                    img.get_pixel(0, 0).0[0] < 32,
+                    "{format}: quiet zone is dark"
+                );
+                continue;
+            }
+            assert_eq!(scan(&out.stdout), "styled", "{format} {style:?}");
+        }
+    }
+}
+
+#[test]
+fn size_sets_the_exact_image_dimensions() {
+    for format in ["png", "jpeg", "webp"] {
+        let out = qr()
+            .args(["-f", format, "--size", "300", "hello"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let img = image::load_from_memory(&out.stdout).unwrap();
+        assert_eq!((img.width(), img.height()), (300, 300), "{format}");
+    }
+    qr().args(["-f", "png", "--size", "300", "--scale", "3", "x"])
         .assert()
         .code(2)
-        .stderr(
-            "error: png output is not supported yet\n  \
-             hint: use -o code.svg or -o code.pdf for a scalable image\n",
-        );
-    assert_eq!(leftovers(dir.path(), &[]), Vec::<String>::new());
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn png_data_uri_holds_the_image() {
+    let out = qr()
+        .args(["--data-uri", "-f", "png", "hello"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let uri = String::from_utf8(out.stdout).unwrap();
+    let b64 = uri
+        .strip_prefix("data:image/png;base64,")
+        .unwrap()
+        .trim_end();
+    let png = qr().args(["-f", "png", "hello"]).output().unwrap().stdout;
+    assert_eq!(b64, base64(&png));
+    assert_eq!(uri.lines().count(), 1);
+}
+
+/// Standard padded base64, to check the CLI's own encoder independently.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn dpi_is_recorded_in_png_and_jpeg() {
+    let png = qr()
+        .args(["-f", "png", "--dpi", "300", "hello"])
+        .output()
+        .unwrap()
+        .stdout;
+    // pHYs: 11,811 pixels per metre on both axes, unit 1 (metre).
+    let at = png.windows(4).position(|w| w == b"pHYs").unwrap();
+    assert_eq!(
+        &png[at + 4..at + 13],
+        &[0, 0, 0x2e, 0x23, 0, 0, 0x2e, 0x23, 1]
+    );
+    let jpeg = qr()
+        .args(["-f", "jpeg", "--dpi", "300", "hello"])
+        .output()
+        .unwrap()
+        .stdout;
+    let at = jpeg.windows(5).position(|w| w == b"JFIF\0").unwrap();
+    assert_eq!(&jpeg[at + 7..at + 12], &[1, 1, 44, 1, 44]);
+}
+
+#[test]
+fn raster_bytes_go_to_a_piped_stdout() {
+    // Not a terminal here, so stdout gets the bytes.
+    let out = qr().args(["-f", "webp", "hello"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(out.stdout.starts_with(b"RIFF"));
 }
 
 #[cfg(unix)]

@@ -60,18 +60,6 @@ pub enum CliError {
     #[error("cannot infer the output format from '{}'", .0.display())]
     UnknownExtension(PathBuf),
 
-    /// The format is accepted by the parser but has no renderer yet.
-    #[error("{} output is not supported yet", .format.name())]
-    UnsupportedFormat {
-        /// The format asked for.
-        format: OutputFormat,
-        /// The `-o` file whose name should change, when the image itself is
-        /// written there (not with `--data-uri`, where `-f` picks it).
-        file: Option<PathBuf>,
-        /// Whether the format came from `-f` rather than the extension.
-        flag: bool,
-    },
-
     /// Binary output was headed for a terminal.
     #[error("refusing to write binary {} output to a terminal", .0.name())]
     BinaryToTerminal(OutputFormat),
@@ -119,11 +107,14 @@ impl CliError {
             | Self::EmptyInput { .. }
             | Self::Encode(EncodeError::InvalidCharacter { .. })
             | Self::UnknownExtension(_)
-            | Self::UnsupportedFormat { .. }
             | Self::BinaryToTerminal(_)
             | Self::DataUriNeedsImage(_)
-            | Self::JsonNeedsOutput(_)
-            | Self::Render(_) => ExitStatus::Usage,
+            | Self::JsonNeedsOutput(_) => ExitStatus::Usage,
+            // An encoder failing on valid options is not the user's fault.
+            Self::Render(RenderError::Encoder { .. }) => ExitStatus::Internal,
+            // Every other render error is a size or option limit.
+            #[allow(clippy::match_same_arms)]
+            Self::Render(_) => ExitStatus::Usage,
             Self::InputTooLong { .. } | Self::Encode(EncodeError::DataTooLong(_)) => {
                 ExitStatus::DataTooLong
             }
@@ -148,7 +139,6 @@ impl CliError {
             Self::ReadInput { .. } => "read_failed",
             Self::Output(_) | Self::WriteFile { .. } => "write_failed",
             Self::UnknownExtension(_) => "unknown_extension",
-            Self::UnsupportedFormat { .. } => "unsupported_format",
             Self::BinaryToTerminal(_) => "binary_to_terminal",
             Self::DataUriNeedsImage(_) => "data_uri_needs_image",
             Self::JsonNeedsOutput(_) => "json_needs_output",
@@ -188,28 +178,6 @@ impl CliError {
                 "pass -f FORMAT or use one of {}",
                 known_extensions()
             )),
-            // The hint must lead to a file whose name matches its content.
-            Self::UnsupportedFormat { file: None, .. } => {
-                Some("use -f svg or -f pdf for a scalable image".to_owned())
-            }
-            Self::UnsupportedFormat {
-                format,
-                file: Some(path),
-                flag,
-            } => {
-                let svg = path.with_extension("svg");
-                let pdf = path.with_extension("pdf");
-                let drop = if *flag {
-                    format!("drop -f {} and ", format.name())
-                } else {
-                    String::new()
-                };
-                Some(format!(
-                    "{drop}use -o {} or -o {} for a scalable image",
-                    svg.display(),
-                    pdf.display()
-                ))
-            }
             Self::BinaryToTerminal(f) => Some(format!(
                 "redirect stdout to a file or use -o code.{}",
                 f.name()
@@ -359,15 +327,6 @@ mod tests {
                 "unknown_extension",
             ),
             (
-                CliError::UnsupportedFormat {
-                    format: OutputFormat::Png,
-                    file: None,
-                    flag: true,
-                },
-                ExitStatus::Usage,
-                "unsupported_format",
-            ),
-            (
                 CliError::OutputNotAFile("p".into()),
                 ExitStatus::Io,
                 "output_not_a_file",
@@ -403,14 +362,13 @@ mod tests {
             (render.exit_status(), render.code(), render.hint()),
             (ExitStatus::Usage, "render_failed", None)
         );
+        let encoder = CliError::Render(RenderError::Encoder {
+            format: "png",
+            message: "x".into(),
+        });
         assert_eq!(
-            CliError::UnsupportedFormat {
-                format: OutputFormat::Webp,
-                file: None,
-                flag: true
-            }
-            .to_string(),
-            "webp output is not supported yet"
+            (encoder.exit_status(), encoder.code(), encoder.hint()),
+            (ExitStatus::Internal, "render_failed", None)
         );
     }
 

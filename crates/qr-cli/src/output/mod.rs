@@ -79,8 +79,8 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// A usage error for an unknown `-o` extension, a format without a
-    /// renderer, `--data-uri` with a text format, `--json` sharing stdout
+    /// A usage error for an unknown `-o` extension, `--data-uri` with a
+    /// text format, `--json` sharing stdout
     /// with the code, or binary output to a terminal; an I/O error when the
     /// `-o` path is a directory or exists under `--no-clobber`.
     pub fn resolve(
@@ -108,16 +108,6 @@ impl Plan {
             (None, Target::Stdout) => OutputFormat::Text,
         };
 
-        if format.renderer() == Renderer::Raster {
-            return Err(CliError::UnsupportedFormat {
-                format,
-                file: match &target {
-                    Target::File(path) if !args.data_uri => Some(path.clone()),
-                    Target::File(_) | Target::Stdout => None,
-                },
-                flag: args.format.is_some(),
-            });
-        }
         if args.data_uri && !format.is_image() {
             return Err(CliError::DataUriNeedsImage(format));
         }

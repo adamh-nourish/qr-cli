@@ -32,6 +32,8 @@ predicates.workspace = true
 insta.workspace = true
 rqrr.workspace = true
 roxmltree.workspace = true
+# Decodes PNG, JPEG and WebP output for the rqrr round-trip tests.
+image = { workspace = true, features = ["png", "jpeg", "webp"] }
 
 [lints]
 workspace = true

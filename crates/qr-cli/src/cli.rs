@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use qr_core::render::MAX_CANVAS_SIDE;
+use qr_core::render::{MAX_CANVAS_SIDE, MAX_DPI};
 use qr_core::{Color, EcLevel, Mask, ModeChoice, Version};
 
 /// The largest `--margin` accepted, in modules. Equal to the renderer's own
@@ -26,6 +26,7 @@ Examples:
   qr 'https://example.com'     Show a QR code in the terminal
   echo hello | qr              Encode stdin (one trailing newline is dropped)
   qr 'hi' -o code.svg          Write an SVG file (format from the extension)
+  qr 'hi' --size 512 -o c.png  Write a 512x512 PNG image
   qr 'hi' -f pdf -o - > c.pdf  Write a PDF to stdout
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr -- help                   Encode a word that is also a command name,
@@ -128,13 +129,33 @@ pub struct GenerateArgs {
     )]
     pub margin: u16,
 
-    /// Size of one module in pixels (SVG) or points (PDF, EPS) [default: 10].
+    /// Size of one module in pixels (PNG, JPEG, WebP, SVG) or points (PDF,
+    /// EPS) [default: 10].
     #[arg(
         long,
         value_name = "N",
         value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_SCALE))
     )]
     pub scale: Option<u32>,
+
+    /// Width and height of a PNG, JPEG or WebP image in pixels, with the
+    /// largest whole module size that fits (vector formats are at most this
+    /// size).
+    #[arg(
+        long,
+        value_name = "PX",
+        conflicts_with = "scale",
+        value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_CANVAS_SIDE))
+    )]
+    pub size: Option<u32>,
+
+    /// Pixel density to record in a PNG or JPEG file, in dots per inch.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_DPI))
+    )]
+    pub dpi: Option<u32>,
 
     /// Colour of dark modules: #RGB, #RRGGBB, #RRGGBBAA or a CSS name
     /// [default: black].
@@ -199,14 +220,14 @@ pub enum OutputFormat {
     Text,
     /// '##' and spaces, pure ASCII.
     Ascii,
-    /// PNG image (not supported yet).
+    /// PNG image (1-bit indexed, or RGBA when transparent).
     Png,
     /// Scalable Vector Graphics.
     Svg,
-    /// JPEG image (not supported yet).
+    /// JPEG image (quality 92; at least 4 pixels per module).
     #[value(alias = "jpg")]
     Jpeg,
-    /// Lossless WebP image (not supported yet).
+    /// Lossless WebP image.
     Webp,
     /// One-page vector PDF.
     Pdf,
@@ -247,6 +268,7 @@ mod tests {
         assert_eq!(g.margin, 4);
         assert_eq!((g.qr_version, g.mask, g.format), (None, None, None));
         assert_eq!((g.output, g.scale, g.fg, g.bg), (None, None, None, None));
+        assert_eq!((g.size, g.dpi), (None, None));
         assert!(!(g.transparent || g.invert || g.data_uri || g.no_clobber || g.json));
         assert_eq!(cli.global.color, ColorChoice::Auto);
         assert!(cli.command.is_none());
@@ -295,6 +317,17 @@ mod tests {
     }
 
     #[test]
+    fn size_and_dpi_parse_and_size_conflicts_with_scale() {
+        let cli = Cli::try_parse_from(["qr", "--size", "512", "--dpi", "300", "x"]).unwrap();
+        assert_eq!(
+            (cli.generate.size, cli.generate.dpi),
+            (Some(512), Some(300))
+        );
+        let err = Cli::try_parse_from(["qr", "--size", "512", "--scale", "4", "x"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
     fn no_clobber_needs_an_output_path() {
         let err = Cli::try_parse_from(["qr", "--no-clobber", "x"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
@@ -316,6 +349,10 @@ mod tests {
             ["qr", "--margin", "101"],
             ["qr", "--scale", "0"],
             ["qr", "--scale", "16385"],
+            ["qr", "--size", "0"],
+            ["qr", "--size", "16385"],
+            ["qr", "--dpi", "0"],
+            ["qr", "--dpi", "65536"],
             ["qr", "--fg", "notacolour"],
             ["qr", "--bg", "#12"],
         ] {
