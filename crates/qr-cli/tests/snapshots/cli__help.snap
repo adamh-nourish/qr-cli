@@ -21,13 +21,24 @@ Options:
   -i, --input <FILE>
           Read the data to encode from FILE (raw bytes); '-' reads stdin
 
+  -o, --output <PATH|->
+          Write the code to PATH ('-' for stdout). Existing files are replaced atomically; a symlink
+          is replaced, not followed
+
   -f, --format <FORMAT>
-          Output format [default: terminal when stdout is a terminal, else text]
+          Output format [default: from the -o extension; else terminal when stdout is a terminal,
+          otherwise text]
 
           Possible values:
           - terminal: Unicode half blocks, forced black on white with ANSI colours
           - text:     Unicode half blocks with no escape sequences
           - ascii:    '##' and spaces, pure ASCII
+          - png:      PNG image (not supported yet)
+          - svg:      Scalable Vector Graphics
+          - jpeg:     JPEG image (not supported yet)
+          - webp:     Lossless WebP image (not supported yet)
+          - pdf:      One-page vector PDF
+          - eps:      Encapsulated PostScript
 
       --ec <LEVEL>
           Error correction level: L, M, Q or H
@@ -50,8 +61,29 @@ Options:
           
           [default: 4]
 
+      --scale <N>
+          Size of one module in pixels (SVG) or points (PDF, EPS) [default: 10]
+
+      --fg <COLOR>
+          Colour of dark modules: #RGB, #RRGGBB, #RRGGBBAA or a CSS name [default: black]
+
+      --bg <COLOR>
+          Colour of light modules and the quiet zone [default: white]
+
+      --transparent
+          Leave the background unpainted (image formats only)
+
       --invert
-          Swap dark and light modules (for light-on-dark text output)
+          Swap dark and light modules (or --fg and --bg for images)
+
+      --data-uri
+          Print the image as a base64 data: URI instead of raw bytes [default format: svg]
+
+      --no-clobber
+          Fail instead of replacing an existing -o file
+
+      --json
+          Print a JSON result object on stdout and JSON errors on stderr
 
       --keep-newline
           Keep a trailing newline read from stdin or a file
@@ -82,6 +114,9 @@ Examples:
   qr 'https://example.com'     Show a QR code in the terminal
   echo hello | qr              Encode stdin (one trailing newline is dropped)
   qr -i payload.txt -f ascii   Encode a file as ASCII art
+  qr 'hi' -o code.svg          Write an SVG file (format from the extension)
+  qr 'hi' -f pdf -o - > c.pdf  Write a PDF to stdout
+  qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr -- help                   Encode a word that is also a command name,
                                such as 'help', 'man' or 'completions'
 

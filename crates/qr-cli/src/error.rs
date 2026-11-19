@@ -1,11 +1,14 @@
 //! Typed errors for the CLI layer and their exit statuses and hints.
 
 use std::io;
+use std::path::PathBuf;
 
-use qr_core::{EcLevel, EncodeError, max_chars};
+use qr_core::{EcLevel, EncodeError, RenderError, max_chars};
 
+use crate::cli::OutputFormat;
 use crate::exit::ExitStatus;
 use crate::input::InputSource;
+use crate::output::{WriteError, known_extensions};
 
 /// Errors the CLI reports to the user before exiting with a non-zero status.
 ///
@@ -53,6 +56,44 @@ pub enum CliError {
     #[error("cannot write output: {}", io_reason(.0))]
     Output(#[source] io::Error),
 
+    /// `-o PATH` without `-f`, and the extension names no known format.
+    #[error("cannot infer the output format from '{}'", .0.display())]
+    UnknownExtension(PathBuf),
+
+    /// The format is accepted by the parser but has no renderer yet.
+    #[error("{} output is not supported yet", .0.name())]
+    UnsupportedFormat(OutputFormat),
+
+    /// Binary output was headed for a terminal.
+    #[error("refusing to write binary {} output to a terminal", .0.name())]
+    BinaryToTerminal(OutputFormat),
+
+    /// `--data-uri` with a text format.
+    #[error("--data-uri needs an image format, not {}", .0.name())]
+    DataUriNeedsImage(OutputFormat),
+
+    /// `--json` while the code itself would also go to stdout.
+    #[error("--json cannot share stdout with the {} output", .0.name())]
+    JsonNeedsOutput(OutputFormat),
+
+    /// The renderer rejected the options (for example, too large).
+    #[error(transparent)]
+    Render(#[from] RenderError),
+
+    /// `--no-clobber` and the output file exists.
+    #[error("output file '{}' already exists", .0.display())]
+    OutputExists(PathBuf),
+
+    /// Creating or writing the output file failed.
+    #[error("cannot write '{}': {}", .path.display(), io_reason(.error))]
+    WriteFile {
+        /// The output path.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        error: io::Error,
+    },
+
     /// A bug: something that should be impossible happened.
     #[error("internal error: {0}")]
     Internal(String),
@@ -64,12 +105,43 @@ impl CliError {
         match self {
             Self::StdinIsTerminal
             | Self::EmptyInput { .. }
-            | Self::Encode(EncodeError::InvalidCharacter { .. }) => ExitStatus::Usage,
+            | Self::Encode(EncodeError::InvalidCharacter { .. })
+            | Self::UnknownExtension(_)
+            | Self::UnsupportedFormat(_)
+            | Self::BinaryToTerminal(_)
+            | Self::DataUriNeedsImage(_)
+            | Self::JsonNeedsOutput(_)
+            | Self::Render(_) => ExitStatus::Usage,
             Self::InputTooLong { .. } | Self::Encode(EncodeError::DataTooLong(_)) => {
                 ExitStatus::DataTooLong
             }
-            Self::ReadInput { .. } | Self::Output(_) => ExitStatus::Io,
+            Self::ReadInput { .. }
+            | Self::Output(_)
+            | Self::OutputExists(_)
+            | Self::WriteFile { .. } => ExitStatus::Io,
             Self::Encode(_) | Self::Internal(_) => ExitStatus::Internal,
+        }
+    }
+
+    /// A stable machine-readable name for the error, used by `--json`.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::StdinIsTerminal => "no_input",
+            Self::EmptyInput { .. } => "empty_input",
+            Self::InputTooLong { .. } | Self::Encode(EncodeError::DataTooLong(_)) => {
+                "data_too_long"
+            }
+            Self::Encode(EncodeError::InvalidCharacter { .. }) => "invalid_character",
+            Self::ReadInput { .. } => "read_failed",
+            Self::Output(_) | Self::WriteFile { .. } => "write_failed",
+            Self::UnknownExtension(_) => "unknown_extension",
+            Self::UnsupportedFormat(_) => "unsupported_format",
+            Self::BinaryToTerminal(_) => "binary_to_terminal",
+            Self::DataUriNeedsImage(_) => "data_uri_needs_image",
+            Self::JsonNeedsOutput(_) => "json_needs_output",
+            Self::Render(_) => "render_failed",
+            Self::OutputExists(_) => "output_exists",
+            Self::Encode(_) | Self::Internal(_) => "internal",
         }
     }
 
@@ -98,7 +170,41 @@ impl CliError {
                 origin: InputSource::File(_),
                 ..
             } => Some("check the path passed to -i".to_owned()),
-            Self::ReadInput { .. } | Self::Output(_) => None,
+            Self::UnknownExtension(_) => Some(format!(
+                "pass -f FORMAT or use one of {}",
+                known_extensions()
+            )),
+            Self::UnsupportedFormat(_) => {
+                Some("use -f svg or -f pdf for a scalable image".to_owned())
+            }
+            Self::BinaryToTerminal(f) => Some(format!(
+                "redirect stdout to a file or use -o code.{}",
+                f.name()
+            )),
+            Self::DataUriNeedsImage(_) => Some("use -f svg, -f pdf or -f eps".to_owned()),
+            Self::JsonNeedsOutput(_) => Some(
+                "write the code to a file with -o PATH, or add --data-uri to put it in the JSON"
+                    .to_owned(),
+            ),
+            Self::OutputExists(_) => {
+                Some("remove it, choose another path or drop --no-clobber".to_owned())
+            }
+            Self::WriteFile { error, .. } if error.kind() == io::ErrorKind::NotFound => {
+                Some("check that the directory exists".to_owned())
+            }
+            // A render error's message already says what to change.
+            Self::ReadInput { .. } | Self::Output(_) | Self::WriteFile { .. } | Self::Render(_) => {
+                None
+            }
+        }
+    }
+}
+
+impl From<WriteError> for CliError {
+    fn from(err: WriteError) -> Self {
+        match err {
+            WriteError::Exists(path) => Self::OutputExists(path),
+            WriteError::Io { path, error } => Self::WriteFile { path, error },
         }
     }
 }
@@ -200,6 +306,102 @@ mod tests {
             if status != ExitStatus::Io {
                 assert!(err.hint().is_some(), "{err}");
             }
+        }
+    }
+
+    #[test]
+    fn output_errors_have_statuses_codes_and_hints() {
+        use crate::cli::OutputFormat;
+        let table = [
+            (
+                CliError::UnknownExtension("a.gif".into()),
+                ExitStatus::Usage,
+                "unknown_extension",
+            ),
+            (
+                CliError::UnsupportedFormat(OutputFormat::Png),
+                ExitStatus::Usage,
+                "unsupported_format",
+            ),
+            (
+                CliError::BinaryToTerminal(OutputFormat::Pdf),
+                ExitStatus::Usage,
+                "binary_to_terminal",
+            ),
+            (
+                CliError::DataUriNeedsImage(OutputFormat::Text),
+                ExitStatus::Usage,
+                "data_uri_needs_image",
+            ),
+            (
+                CliError::JsonNeedsOutput(OutputFormat::Text),
+                ExitStatus::Usage,
+                "json_needs_output",
+            ),
+            (
+                CliError::OutputExists("a".into()),
+                ExitStatus::Io,
+                "output_exists",
+            ),
+        ];
+        for (err, status, code) in table {
+            assert_eq!(err.exit_status(), status, "{err}");
+            assert_eq!(err.code(), code, "{err}");
+            assert!(err.hint().is_some(), "{err}");
+        }
+        let render = CliError::Render(RenderError::ZeroScale);
+        assert_eq!(
+            (render.exit_status(), render.code(), render.hint()),
+            (ExitStatus::Usage, "render_failed", None)
+        );
+        assert_eq!(
+            CliError::UnsupportedFormat(OutputFormat::Webp).to_string(),
+            "webp output is not supported yet"
+        );
+    }
+
+    #[test]
+    fn every_error_has_a_code() {
+        let codes = [
+            (CliError::StdinIsTerminal, "no_input"),
+            (
+                CliError::EmptyInput {
+                    origin: InputSource::Stdin,
+                },
+                "empty_input",
+            ),
+            (too_long(EcLevel::M), "data_too_long"),
+            (
+                CliError::InputTooLong {
+                    origin: InputSource::Stdin,
+                    max: 1,
+                },
+                "data_too_long",
+            ),
+            (
+                CliError::Encode(EncodeError::InvalidCharacter {
+                    mode: Mode::Numeric,
+                    offset: 0,
+                    byte: b'x',
+                }),
+                "invalid_character",
+            ),
+            (
+                CliError::ReadInput {
+                    origin: InputSource::Stdin,
+                    error: io::Error::other("x"),
+                },
+                "read_failed",
+            ),
+            (CliError::Output(io::Error::other("x")), "write_failed"),
+            (CliError::Internal("x".into()), "internal"),
+            (
+                CliError::Encode(EncodeError::Internal("x".into())),
+                "internal",
+            ),
+        ];
+        for (err, code) in codes {
+            assert_eq!(err.code(), code, "{err}");
         }
     }
 

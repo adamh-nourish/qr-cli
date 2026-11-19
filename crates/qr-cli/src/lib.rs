@@ -8,6 +8,8 @@
 //! - [`cli`]: the clap definition, the single source for help, completions
 //!   and the man page;
 //! - [`input`]: input resolution and bounded reads;
+//! - [`output`]: output format resolution, atomic file writes, `data:`
+//!   URIs and the `--json` objects;
 //! - [`diag`]: errors, warnings and notes on stderr;
 //! - [`env`](mod@env): terminal and environment detection;
 //! - [`error`] and [`exit`]: typed errors and the exit status contract.
@@ -21,6 +23,7 @@ pub mod error;
 pub mod exit;
 mod generate;
 pub mod input;
+pub mod output;
 mod tooling;
 
 use std::ffi::OsString;
@@ -59,9 +62,10 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(args) {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(err) => return report_parse_error(&err, ctx),
+        Err(err) => return report_parse_error(&err, wants_json(&args), ctx),
     };
 
     let Context {
@@ -75,7 +79,8 @@ where
         &mut **stderr,
         global.color.enabled(env.stderr_is_tty, env),
         Verbosity::from_flags(global.quiet, global.verbose),
-    );
+    )
+    .with_json(cli.generate.json);
 
     let result = match cli.command {
         Some(Command::Completions { shell }) => tooling::completions(shell, &mut **stdout),
@@ -95,14 +100,40 @@ where
     match result {
         Ok(()) => ExitStatus::Success,
         Err(err) => {
-            reporter.error(&err.to_string(), err.hint().as_deref());
+            reporter.error(err.code(), &err.to_string(), err.hint().as_deref());
             err.exit_status()
         }
     }
 }
 
+/// Whether `--json` appears among the options, so that a command line clap
+/// rejects still gets its error as JSON. Arguments after `--` are data.
+fn wants_json(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|a| a.as_os_str() != "--")
+        .any(|a| a.as_os_str() == "--json")
+}
+
 /// Prints a clap error (or `--help`/`--version` output) and picks the status.
-fn report_parse_error(err: &clap::Error, ctx: &mut Context<'_>) -> ExitStatus {
+fn report_parse_error(err: &clap::Error, json: bool, ctx: &mut Context<'_>) -> ExitStatus {
+    if json && err.use_stderr() {
+        let extra = extra_argument(err);
+        let message = extra.as_ref().map_or_else(
+            || {
+                first_error_line(&err.render().to_string())
+                    .unwrap_or_else(|| "invalid command line".to_owned())
+            },
+            |word| format!("unexpected extra argument '{word}'"),
+        );
+        let hint = extra
+            .is_some()
+            .then_some("quote text that contains spaces: qr 'hello world'");
+        Reporter::new(&mut *ctx.stderr, false, Verbosity::Normal)
+            .with_json(true)
+            .error("usage", &message, hint);
+        return ExitStatus::Usage;
+    }
     if let Some(extra) = extra_argument(err) {
         // Best effort, as below. The argument is user data.
         let _ = write!(
@@ -136,6 +167,14 @@ fn report_parse_error(err: &clap::Error, ctx: &mut Context<'_>) -> ExitStatus {
             }
         }
     }
+}
+
+/// The text of clap's first `error:` line, without the label.
+fn first_error_line(rendered: &str) -> Option<String> {
+    rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("error: "))
+        .map(str::to_owned)
 }
 
 /// The stray word in `qr hello world`, if that is what `err` is about.

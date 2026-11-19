@@ -26,7 +26,9 @@ divan = "0.1.21"
 assert_cmd = "2"
 predicates = "3"
 insta = { version = "1", default-features = false }
-tempfile = "3"
+tempfile = "3.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 roxmltree = "0.20"
 
 [workspace.lints.rust]

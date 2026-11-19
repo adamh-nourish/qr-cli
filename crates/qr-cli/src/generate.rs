@@ -1,10 +1,11 @@
-//! The default command: read the input, encode it and render it.
+//! The default command: read the input, encode it, render it and write it.
 
 use std::io::{Read, Write};
 
-use qr_core::render::DEFAULT_MARGIN;
+use qr_core::render::{DEFAULT_MARGIN, DEFAULT_SCALE};
 use qr_core::{
-    EncodeOptions, Matrix, QrCode, TextFormat, TextOptions, VersionChoice, encode, render_text,
+    Color, EncodeOptions, Matrix, QrCode, RenderOptions, TextFormat, TextOptions, VersionChoice,
+    encode, render_text, render_vector,
 };
 
 use crate::cli::{ColorChoice, GenerateArgs, OutputFormat};
@@ -12,6 +13,8 @@ use crate::diag::Reporter;
 use crate::env::Env;
 use crate::error::CliError;
 use crate::input::{Input, InputRequest, read_input};
+use crate::output::json::{self, Generated};
+use crate::output::{Delivered, Plan, Renderer, Target};
 
 /// Streams and settings the generate command needs.
 pub(crate) struct Generate<'a, 'r> {
@@ -35,6 +38,9 @@ impl Generate<'_, '_> {
             reporter,
         } = self;
 
+        // Output errors come first, before stdin is consumed.
+        let plan = Plan::resolve(args, env.stdout_is_tty, reporter)?;
+
         let request = InputRequest {
             text: args.text.as_deref(),
             file: args.input.as_deref(),
@@ -44,47 +50,113 @@ impl Generate<'_, '_> {
         let code = encode(&input.data, &encode_options(args))?;
         reporter.note(&describe(&input, &code));
 
-        let format = args.format.unwrap_or(if env.stdout_is_tty {
-            OutputFormat::Terminal
-        } else {
-            OutputFormat::Text
-        });
-        let text_format = match format {
-            OutputFormat::Terminal if color.enabled(env.stdout_is_tty, env) => TextFormat::Ansi,
-            OutputFormat::Terminal => {
-                reporter.note(
-                    "colour is off, so the code is drawn in the terminal's own colours; \
-                     if it looks reversed, add --invert",
-                );
-                TextFormat::Unicode
-            }
-            OutputFormat::Text => TextFormat::Unicode,
-            OutputFormat::Ascii => TextFormat::Ascii,
-        };
-        let options = TextOptions::default()
-            .with_margin(usize::from(args.margin))
-            .with_invert(args.invert);
-
-        if options.margin < DEFAULT_MARGIN {
+        if usize::from(args.margin) < DEFAULT_MARGIN {
             reporter.warn(
                 &format!(
                     "a margin of {} is below the {DEFAULT_MARGIN}-module quiet zone \
                      the standard requires; some scanners may fail",
-                    options.margin
+                    args.margin
                 ),
                 Some("use --margin 4"),
             );
         }
-        // Any text format wraps on a narrow terminal, and ASCII (two columns
-        // per module) is the widest of them.
-        if env.stdout_is_tty {
-            check_width(code.matrix(), text_format, &options, env, reporter);
-        }
 
-        let rendered = render_text(code.matrix(), text_format, &options);
-        stdout
-            .write_all(rendered.as_bytes())
-            .map_err(CliError::Output)
+        let rendered = match plan.format.renderer() {
+            Renderer::Vector(format) => {
+                render_vector(code.matrix(), format, &render_options(args))?
+            }
+            Renderer::Text => {
+                warn_unused_image_flags(args, reporter);
+                // Colour follows the stream the text ends up on.
+                let enabled = color.enabled(plan.is_stdout() && env.stdout_is_tty, env);
+                let text_format = plan.format.text_format(enabled).ok_or_else(|| {
+                    CliError::Internal(format!("{} is not a text format", plan.format.name()))
+                })?;
+                if plan.format == OutputFormat::Terminal && !enabled && plan.is_stdout() {
+                    reporter.note(
+                        "colour is off, so the code is drawn in the terminal's own colours; \
+                         if it looks reversed, add --invert",
+                    );
+                }
+                let options = TextOptions::default()
+                    .with_margin(usize::from(args.margin))
+                    .with_invert(args.invert);
+                // Any text format wraps on a narrow terminal, and ASCII (two
+                // columns per module) is the widest of them.
+                if plan.is_stdout() && env.stdout_is_tty {
+                    check_width(code.matrix(), text_format, &options, env, reporter);
+                }
+                render_text(code.matrix(), text_format, &options).into_bytes()
+            }
+            // `Plan::resolve` refuses formats without a renderer.
+            Renderer::Raster => return Err(CliError::UnsupportedFormat(plan.format)),
+        };
+
+        let delivered = plan.deliver(rendered, stdout)?;
+        if plan.json {
+            let line = json::object(&result(&plan, &input, &code, delivered));
+            stdout
+                .write_all(line.as_bytes())
+                .map_err(CliError::Output)?;
+        }
+        Ok(())
+    }
+}
+
+/// The renderer options selected by the flags. `--invert` swaps the
+/// colours, so it composes with `--fg` and `--bg`.
+fn render_options(args: &GenerateArgs) -> RenderOptions {
+    let (mut fg, mut bg) = (
+        args.fg.unwrap_or(Color::BLACK),
+        args.bg.unwrap_or(Color::WHITE),
+    );
+    if args.invert {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    RenderOptions::default()
+        .with_margin(usize::from(args.margin))
+        .with_scale(args.scale.unwrap_or(DEFAULT_SCALE))
+        .with_fg(fg)
+        .with_bg(bg)
+        .with_transparent(args.transparent)
+}
+
+/// Warns about image-only flags given with a text format, where they would
+/// otherwise be silently ignored.
+fn warn_unused_image_flags(args: &GenerateArgs, reporter: &mut Reporter<'_>) {
+    let unused: Vec<&str> = [
+        (args.scale.is_some(), "--scale"),
+        (args.fg.is_some(), "--fg"),
+        (args.bg.is_some(), "--bg"),
+        (args.transparent, "--transparent"),
+    ]
+    .into_iter()
+    .filter_map(|(set, flag)| set.then_some(flag))
+    .collect();
+    if !unused.is_empty() {
+        reporter.warn(
+            &format!("{} only applies to image formats", unused.join(", ")),
+            Some("add -f svg or -o code.svg"),
+        );
+    }
+}
+
+/// The `--json` result object.
+fn result(plan: &Plan, input: &Input, code: &QrCode, delivered: Delivered) -> Generated {
+    Generated {
+        output: match &plan.target {
+            Target::File(path) => Some(path.to_string_lossy().into_owned()),
+            Target::Stdout => None,
+        },
+        format: plan.format.name(),
+        version: code.version().number(),
+        ec: code.ec_level().to_string(),
+        mode: code.mode().to_string(),
+        mask: code.mask().number(),
+        modules: code.matrix().width(),
+        bytes: input.data.len(),
+        written: delivered.written,
+        data_uri: delivered.data_uri,
     }
 }
 

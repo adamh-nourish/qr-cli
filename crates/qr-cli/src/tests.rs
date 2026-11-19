@@ -571,3 +571,352 @@ fn subcommand_words_are_encodable_after_double_dash() {
     assert_eq!(o.status, ExitStatus::Success);
     assert_eq!(decode_grid(&parse_half_blocks(&o.out)), "man");
 }
+
+/// Runs with stdout as raw bytes (for binary formats).
+fn run_bytes(args: &[&str], env: Env) -> (ExitStatus, Vec<u8>, String) {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let status = run(
+        args.iter().copied(),
+        &mut Context {
+            stdin: &mut io::empty(),
+            stdout: &mut out,
+            stderr: &mut err,
+            env,
+        },
+    );
+    (status, out, String::from_utf8(err).unwrap())
+}
+
+fn hello_matrix() -> qr_core::QrCode {
+    qr_core::encode(b"hello", &qr_core::EncodeOptions::default()).unwrap()
+}
+
+#[test]
+fn vector_formats_go_to_stdout_when_piped() {
+    let code = hello_matrix();
+    for format in qr_core::VectorFormat::ALL {
+        let name = format.extension();
+        let (status, out, err) = run_bytes(&["qr", "-f", name, "hello"], piped());
+        assert_eq!(status, ExitStatus::Success, "{name}: {err}");
+        assert_eq!(err, "");
+        let expected =
+            qr_core::render_vector(code.matrix(), format, &qr_core::RenderOptions::default())
+                .unwrap();
+        assert_eq!(out, expected, "{name}");
+    }
+}
+
+#[test]
+fn binary_output_to_a_terminal_is_refused_before_reading_stdin() {
+    let (status, out, err) = run_bytes(&["qr", "-f", "pdf", "-"], terminal());
+    assert_eq!(status, ExitStatus::Usage);
+    assert_eq!(out, b"");
+    assert!(
+        err.contains("refusing to write binary pdf output to a terminal"),
+        "{err}"
+    );
+    // SVG is text, so a terminal may show it.
+    let (status, out, _) = run_bytes(&["qr", "-f", "svg", "x"], terminal());
+    assert_eq!(status, ExitStatus::Success);
+    assert!(String::from_utf8(out).unwrap().contains("<svg"));
+}
+
+#[test]
+fn image_flags_reach_the_renderer() {
+    let code = hello_matrix();
+    let (status, out, err) = run_bytes(
+        &[
+            "qr",
+            "-f",
+            "svg",
+            "--margin",
+            "2",
+            "--scale",
+            "3",
+            "--fg",
+            "navy",
+            "--bg",
+            "#ffcc00",
+            "--transparent",
+            "-q",
+            "hello",
+        ],
+        piped(),
+    );
+    assert_eq!(status, ExitStatus::Success, "{err}");
+    let options = qr_core::RenderOptions::default()
+        .with_margin(2)
+        .with_scale(3)
+        .with_fg(qr_core::Color::rgb(0, 0, 0x80))
+        .with_bg(qr_core::Color::rgb(0xff, 0xcc, 0))
+        .with_transparent(true);
+    assert_eq!(
+        out,
+        qr_core::render_svg(code.matrix(), &options)
+            .unwrap()
+            .into_bytes()
+    );
+
+    // --invert swaps the colours for images.
+    let (_, inverted, _) = run_bytes(&["qr", "-f", "svg", "--invert", "hello"], piped());
+    let swapped = qr_core::RenderOptions::default()
+        .with_fg(qr_core::Color::WHITE)
+        .with_bg(qr_core::Color::BLACK);
+    assert_eq!(
+        inverted,
+        qr_core::render_svg(code.matrix(), &swapped)
+            .unwrap()
+            .into_bytes()
+    );
+}
+
+#[test]
+fn image_flags_on_text_output_are_reported_as_unused() {
+    let o = run_piped(&["qr", "--scale", "3", "--fg", "red", "--transparent", "x"]);
+    assert_eq!(o.status, ExitStatus::Success);
+    assert!(
+        o.err
+            .starts_with("warning: --scale, --fg, --transparent only applies to image formats"),
+        "{}",
+        o.err
+    );
+    let o = run_piped(&["qr", "--bg", "red", "x"]);
+    assert!(o.err.starts_with("warning: --bg only"), "{}", o.err);
+    assert_eq!(run_piped(&["qr", "-q", "--bg", "red", "x"]).err, "");
+}
+
+#[test]
+fn oversized_renders_are_usage_errors() {
+    let o = run_piped(&["qr", "-f", "pdf", "--scale", "1000", "x"]);
+    assert_eq!(o.status, ExitStatus::Usage);
+    assert!(
+        o.err.contains("exceeds the 14400 limit for pdf"),
+        "{}",
+        o.err
+    );
+}
+
+#[test]
+fn files_get_the_code_and_stdout_stays_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("code.svg");
+    let o = run_with(
+        &["qr", "-o", path.to_str().unwrap(), "hello"],
+        b"",
+        terminal(),
+    );
+    assert_eq!(o.status, ExitStatus::Success, "{}", o.err);
+    assert_eq!((o.out.as_str(), o.err.as_str()), ("", ""));
+    let expected =
+        qr_core::render_svg(hello_matrix().matrix(), &qr_core::RenderOptions::default()).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+}
+
+#[test]
+fn text_files_are_never_coloured_or_width_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("code.txt");
+    let narrow = Env {
+        terminal_width: Some(10),
+        ..terminal()
+    };
+    let o = run_with(
+        &[
+            "qr",
+            "-f",
+            "terminal",
+            "-o",
+            path.to_str().unwrap(),
+            "-v",
+            "hello",
+        ],
+        b"",
+        narrow,
+    );
+    assert_eq!(o.status, ExitStatus::Success, "{}", o.err);
+    assert!(!o.err.contains("columns wide"), "{}", o.err);
+    // The colour note is about how a terminal shows the code.
+    assert!(!o.err.contains("colour is off"), "{}", o.err);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains('\x1b'));
+    assert_eq!(decode_grid(&parse_half_blocks(&text)), "hello");
+
+    // --color always still colours a file, as it would a pipe.
+    let o = run_with(
+        &[
+            "qr",
+            "-f",
+            "terminal",
+            "--color",
+            "always",
+            "-o",
+            path.to_str().unwrap(),
+            "hello",
+        ],
+        b"",
+        terminal(),
+    );
+    assert_eq!(o.status, ExitStatus::Success);
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("\x1b[30;107m")
+    );
+}
+
+#[test]
+fn json_reports_the_file_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("code.eps");
+    let o = run_piped(&[
+        "qr",
+        "-o",
+        path.to_str().unwrap(),
+        "--json",
+        "--ec",
+        "H",
+        "hello",
+    ]);
+    assert_eq!(o.status, ExitStatus::Success, "{}", o.err);
+    let size = std::fs::metadata(&path).unwrap().len();
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    assert_eq!(v["output"], path.to_str().unwrap());
+    assert_eq!(v["format"], "eps");
+    assert_eq!(v["version"], 1);
+    assert_eq!(v["ec"], "H");
+    assert_eq!(v["mode"], "byte");
+    assert_eq!(v["modules"], 21);
+    assert_eq!(v["bytes"], 5);
+    assert_eq!(v["written"], size);
+    assert!(v["mask"].as_u64().unwrap() < 8);
+    assert!(v.get("data_uri").is_none());
+    assert_eq!(o.out.lines().count(), 1);
+}
+
+#[test]
+fn json_data_uri_goes_inside_the_object() {
+    let o = run_piped(&["qr", "--json", "--data-uri", "hello"]);
+    assert_eq!(o.status, ExitStatus::Success, "{}", o.err);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    let svg =
+        qr_core::render_svg(hello_matrix().matrix(), &qr_core::RenderOptions::default()).unwrap();
+    assert_eq!(
+        v["data_uri"],
+        crate::output::data_uri("image/svg+xml", svg.as_bytes())
+    );
+    assert_eq!(v["output"], serde_json::Value::Null);
+    assert_eq!(v["format"], "svg");
+}
+
+#[test]
+fn data_uri_prints_one_line() {
+    let o = run_piped(&["qr", "--data-uri", "-f", "eps", "hello"]);
+    assert_eq!(o.status, ExitStatus::Success, "{}", o.err);
+    assert!(
+        o.out
+            .starts_with("data:application/postscript;base64,JSFQUy1")
+    );
+    assert_eq!(o.out.lines().count(), 1);
+    assert!(o.out.ends_with('\n'));
+}
+
+#[test]
+fn json_errors_go_to_stderr_as_objects() {
+    let o = run_piped(&[
+        "qr",
+        "--json",
+        "--data-uri",
+        "--ec",
+        "L",
+        &"a".repeat(3_000),
+    ]);
+    assert_eq!(o.status, ExitStatus::DataTooLong);
+    assert_eq!(o.out, "");
+    let v: serde_json::Value = serde_json::from_str(&o.err).unwrap();
+    assert_eq!(v["error"]["code"], "data_too_long");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("data too long")
+    );
+    assert_eq!(v["error"]["hint"], "shorten the input");
+
+    let o = run_piped(&["qr", "--json", "x"]);
+    assert_eq!(o.status, ExitStatus::Usage);
+    let v: serde_json::Value = serde_json::from_str(&o.err).unwrap();
+    assert_eq!(v["error"]["code"], "json_needs_output");
+}
+
+#[test]
+fn json_mode_covers_parse_errors_too() {
+    let o = run_piped(&["qr", "--json", "--scale", "0", "x"]);
+    assert_eq!(o.status, ExitStatus::Usage);
+    let v: serde_json::Value = serde_json::from_str(&o.err).unwrap();
+    assert_eq!(v["error"]["code"], "usage");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("invalid value '0' for '--scale"),
+        "{message}"
+    );
+    assert!(v["error"].get("hint").is_none());
+
+    let o = run_piped(&["qr", "--json", "hello", "world"]);
+    let v: serde_json::Value = serde_json::from_str(&o.err).unwrap();
+    assert_eq!(v["error"]["message"], "unexpected extra argument 'world'");
+    assert!(
+        v["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("quote text")
+    );
+
+    // After `--`, "--json" is data, so errors stay plain text.
+    let o = run_piped(&["qr", "--bogus", "--", "--json"]);
+    assert!(o.err.starts_with("error: "), "{}", o.err);
+    // Help is not an error, so it is never JSON.
+    let o = run_piped(&["qr", "--json", "--help"]);
+    assert_eq!(o.status, ExitStatus::Success);
+    assert!(o.out.starts_with("A fast"), "{}", o.out);
+}
+
+#[test]
+fn json_mode_warnings_are_objects_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.svg");
+    let o = run_piped(&[
+        "qr",
+        "--json",
+        "--margin",
+        "1",
+        "-o",
+        path.to_str().unwrap(),
+        "x",
+    ]);
+    assert_eq!(o.status, ExitStatus::Success);
+    let v: serde_json::Value = serde_json::from_str(&o.err).unwrap();
+    assert!(
+        v["warning"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("a margin of 1")
+    );
+}
+
+#[test]
+fn a_failing_json_write_is_an_io_error() {
+    let mut err = Vec::new();
+    let status = run(
+        ["qr", "--json", "--data-uri", "x"],
+        &mut Context {
+            stdin: &mut io::empty(),
+            stdout: &mut BrokenPipe,
+            stderr: &mut err,
+            env: piped(),
+        },
+    );
+    assert_eq!(status, ExitStatus::Io);
+    let v: serde_json::Value = serde_json::from_slice(&err).unwrap();
+    assert_eq!(v["error"]["code"], "write_failed");
+}

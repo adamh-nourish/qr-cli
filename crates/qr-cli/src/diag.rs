@@ -4,6 +4,9 @@
 //! before it is written, because messages can quote user data such as file
 //! names. Colour is decided once, from `--color`, the environment and
 //! whether stderr is a terminal.
+//!
+//! With `--json`, each diagnostic is instead one line of JSON keyed by its
+//! kind, such as `{"error":{"code":"...","message":"...","hint":"..."}}`.
 
 use std::io::Write;
 
@@ -12,6 +15,7 @@ use qr_core::sanitize_for_terminal;
 
 use crate::cli::ColorChoice;
 use crate::env::Env;
+use crate::output::json::{self, Diagnostic};
 
 impl ColorChoice {
     /// Whether to colour a stream, given whether it is a terminal.
@@ -70,6 +74,7 @@ pub struct Reporter<'a> {
     stderr: &'a mut dyn Write,
     color: bool,
     verbosity: Verbosity,
+    json: bool,
 }
 
 impl<'a> Reporter<'a> {
@@ -79,33 +84,62 @@ impl<'a> Reporter<'a> {
             stderr,
             color,
             verbosity,
+            json: false,
         }
     }
 
-    /// Reports an error, always.
-    pub fn error(&mut self, message: &str, hint: Option<&str>) {
-        self.emit(ERROR, "error", message, hint);
+    /// Returns this reporter writing JSON lines (for `--json`) or text.
+    #[must_use]
+    pub fn with_json(mut self, json: bool) -> Self {
+        self.json = json;
+        self
+    }
+
+    /// Reports an error, always. `code` is the stable name `--json` shows.
+    pub fn error(&mut self, code: &str, message: &str, hint: Option<&str>) {
+        self.emit(ERROR, "error", Some(code), message, hint);
     }
 
     /// Reports a warning unless `-q` was given.
     pub fn warn(&mut self, message: &str, hint: Option<&str>) {
         if self.verbosity != Verbosity::Quiet {
-            self.emit(WARNING, "warning", message, hint);
+            self.emit(WARNING, "warning", None, message, hint);
         }
     }
 
     /// Reports a detail only when `-v` was given.
     pub fn note(&mut self, message: &str) {
         if self.verbosity == Verbosity::Verbose {
-            self.emit(NOTE, "note", message, None);
+            self.emit(NOTE, "note", None, message, None);
         }
     }
 
-    fn emit(&mut self, style: Style, label: &str, message: &str, hint: Option<&str>) {
+    fn emit(
+        &mut self,
+        style: Style,
+        label: &str,
+        code: Option<&str>,
+        message: &str,
+        hint: Option<&str>,
+    ) {
+        // JSON escapes C0 controls but not C1 or bidi overrides, so the text
+        // is sanitised either way.
         let message = sanitize_for_terminal(message);
+        let hint = hint.map(sanitize_for_terminal);
+        if self.json {
+            let line = json::keyed(
+                label,
+                &Diagnostic {
+                    code,
+                    message: &message,
+                    hint: hint.as_deref(),
+                },
+            );
+            let _ = self.stderr.write_all(line.as_bytes());
+            return;
+        }
         let _ = writeln!(self.stderr, "{}: {message}", self.paint(style, label));
         if let Some(hint) = hint {
-            let hint = sanitize_for_terminal(hint);
             let _ = writeln!(self.stderr, "  {}: {hint}", self.paint(HINT, "hint"));
         }
     }
@@ -163,7 +197,7 @@ mod tests {
     fn report(color: bool, verbosity: Verbosity) -> String {
         let mut buf = Vec::new();
         let mut r = Reporter::new(&mut buf, color, verbosity);
-        r.error("bad \x1b[2J thing", Some("try \u{202e}this"));
+        r.error("usage", "bad \x1b[2J thing", Some("try \u{202e}this"));
         r.warn("careful", None);
         r.note("detail");
         String::from_utf8(buf).unwrap()
@@ -180,6 +214,25 @@ mod tests {
             "error: bad \\u{1b}[2J thing\n  hint: try \\u{202e}this\n"
         );
         assert!(report(false, Verbosity::Verbose).ends_with("warning: careful\nnote: detail\n"));
+    }
+
+    #[test]
+    fn json_mode_writes_one_object_per_line_and_never_colours() {
+        let mut buf = Vec::new();
+        let mut r = Reporter::new(&mut buf, true, Verbosity::Verbose).with_json(true);
+        r.error("usage", "bad \x1b[2J \u{202e}thing", Some("hint"));
+        r.warn("careful", None);
+        r.note("detail");
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            out,
+            "{\"error\":{\"code\":\"usage\",\"message\":\"bad \\\\u{1b}[2J \\\\u{202e}thing\",\"hint\":\"hint\"}}\n\
+             {\"warning\":{\"message\":\"careful\"}}\n\
+             {\"note\":{\"message\":\"detail\"}}\n"
+        );
+        for line in out.lines() {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
     }
 
     #[test]
