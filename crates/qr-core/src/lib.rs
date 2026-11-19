@@ -1,13 +1,34 @@
 //! Core QR code library for the `qr` command-line tool.
 //!
-//! This crate is deliberately free of I/O: it will hold the module matrix,
-//! the encoder abstraction, payload builders, renderers and resource limits.
-//! The `qr-cli` crate owns argument parsing, files, streams and exit codes.
+//! This crate is deliberately free of I/O. It holds the module [`Matrix`],
+//! the [`QrEncoder`] abstraction, exact [`capacity`] limits and, in later
+//! changes, payload builders, renderers and resource limits. The `qr-cli`
+//! crate owns argument parsing, files, streams and exit codes.
 //!
-//! The scaffold only exposes the crate version; encoding arrives with the
-//! `QrEncoder` trait in a later change.
+//! ```
+//! use qr_core::{EcLevel, EncodeOptions, encode};
+//!
+//! let options = EncodeOptions::default().with_ec_level(EcLevel::H);
+//! let code = encode(b"hello", &options)?;
+//! assert_eq!(code.matrix().width(), 21);
+//! # Ok::<(), qr_core::EncodeError>(())
+//! ```
 
 #![forbid(unsafe_code)]
+
+pub mod capacity;
+mod encode;
+mod error;
+mod matrix;
+mod options;
+
+pub use crate::capacity::max_chars;
+pub use crate::encode::{EncodePlan, FastQrEncoder, QrCode, QrEncoder, encode, plan};
+pub use crate::error::{CapacityError, EncodeError};
+pub use crate::matrix::{Matrix, MatrixError};
+pub use crate::options::{
+    EcLevel, EncodeOptions, Mask, Mode, ModeChoice, OptionError, Version, VersionChoice,
+};
 
 /// Version of this crate, taken from its manifest at compile time.
 ///
