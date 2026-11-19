@@ -6,8 +6,17 @@
 use std::io;
 use std::process::ExitCode;
 
+use qr_cli::{Context, Env};
+
 fn main() -> ExitCode {
+    let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-    qr_cli::run(std::env::args_os(), &mut stdout, &mut stderr).into()
+    let mut ctx = Context {
+        stdin: &mut stdin,
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+        env: Env::detect(),
+    };
+    qr_cli::run(std::env::args_os(), &mut ctx).into()
 }

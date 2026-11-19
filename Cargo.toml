@@ -13,6 +13,10 @@ publish = false
 [workspace.dependencies]
 qr-core = { path = "crates/qr-core", version = "0.1.0" }
 clap = { version = "4.5", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+clap_complete = "4.5"
+clap_mangen = "0.3"
+anstyle = "1"
+terminal_size = "0.4"
 thiserror = "2"
 fast_qr = { version = "0.14", default-features = false }
 qrcode = { version = "0.14", default-features = false }
@@ -21,6 +25,7 @@ proptest = "1"
 divan = "0.1.21"
 assert_cmd = "2"
 predicates = "3"
+insta = { version = "1", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
