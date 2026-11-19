@@ -1,0 +1,90 @@
+---
+source: crates/qr-cli/tests/cli.rs
+expression: "stdout_of(qr().arg(\"--help\"))"
+---
+A fast, secure, portable QR code generator CLI.
+
+Usage: qr [OPTIONS] [TEXT]
+       qr <COMMAND>
+
+Commands:
+  completions  Print a shell completion script to stdout
+  man          Print the man page (roff) to stdout
+  help         Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [TEXT]
+          Text to encode; quote it if it contains spaces. '-' reads stdin, which is also the default
+          when stdin is not a terminal
+
+Options:
+  -i, --input <FILE>
+          Read the data to encode from FILE (raw bytes); '-' reads stdin
+
+  -f, --format <FORMAT>
+          Output format [default: terminal when stdout is a terminal, else text]
+
+          Possible values:
+          - terminal: Unicode half blocks, forced black on white with ANSI colours
+          - text:     Unicode half blocks with no escape sequences
+          - ascii:    '##' and spaces, pure ASCII
+
+      --ec <LEVEL>
+          Error correction level: L, M, Q or H
+          
+          [default: M]
+
+      --qr-version <N>
+          Smallest symbol version to use, 1 to 40 (larger data still grows it)
+
+      --mode <MODE>
+          Data mode: auto, numeric, alnum or byte
+          
+          [default: auto]
+
+      --mask <N>
+          Force mask pattern 0 to 7 instead of picking one automatically
+
+      --margin <N>
+          Quiet zone around the code, in modules (below 4 may not scan)
+          
+          [default: 4]
+
+      --invert
+          Swap dark and light modules (for light-on-dark text output)
+
+      --keep-newline
+          Keep a trailing newline read from stdin or a file
+
+      --color <WHEN>
+          When to use colour; NO_COLOR and CLICOLOR_FORCE are honoured in auto
+
+          Possible values:
+          - auto:   Colour when writing to a terminal, unless the environment says not to
+          - always: Always colour
+          - never:  Never colour
+          
+          [default: auto]
+
+  -q, --quiet
+          Print errors only, no warnings
+
+  -v, --verbose
+          Also print what was encoded and how
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Examples:
+  qr 'https://example.com'     Show a QR code in the terminal
+  echo hello | qr              Encode stdin (one trailing newline is dropped)
+  qr -i payload.txt -f ascii   Encode a file as ASCII art
+  qr -- help                   Encode a word that is also a command name,
+                               such as 'help', 'man' or 'completions'
+
+Exit codes:
+  0 ok, 1 internal error, 2 usage error, 3 data too long, 4 I/O error,
+  5 no code found (decode), 6 verification failed

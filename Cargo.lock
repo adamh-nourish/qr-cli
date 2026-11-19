@@ -105,6 +105,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a35200383f20018d41c14d1ab19c1727c697f544492143f7d93aa39f0187848"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,6 +130,16 @@ name = "clap_lex"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
+
+[[package]]
+name = "clap_mangen"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3b6a8907b1723f211693e27b9af5899b86a9512ef5b08bd4a15b6bceb30da6d"
+dependencies = [
+ "clap",
+ "roff",
+]
 
 [[package]]
 name = "condtype"
@@ -277,6 +296,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "insta"
+version = "1.49.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67d3d2e287e4b86c10b3f3b641033d1f89b74bdb39d05f34952e2b9a6fe21cd"
+dependencies = [
+ "once_cell",
+ "similar",
+ "tempfile",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -395,10 +425,17 @@ dependencies = [
 name = "qr-cli"
 version = "0.1.0"
 dependencies = [
+ "anstyle",
  "assert_cmd",
  "clap",
+ "clap_complete",
+ "clap_mangen",
+ "insta",
  "predicates",
  "qr-core",
+ "rqrr",
+ "tempfile",
+ "terminal_size",
  "thiserror",
 ]
 
@@ -408,6 +445,7 @@ version = "0.1.0"
 dependencies = [
  "divan",
  "fast_qr",
+ "insta",
  "proptest",
  "qrcode",
  "rqrr",
@@ -521,6 +559,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
+name = "roff"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
+
+[[package]]
 name = "rqrr"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -574,6 +618,12 @@ dependencies = [
  "quote",
  "syn 3.0.10",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "strsim"

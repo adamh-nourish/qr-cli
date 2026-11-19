@@ -1,159 +1,164 @@
 //! Library half of the `qr` command-line tool.
 //!
-//! The binary is a thin wrapper around [`run`], which takes the arguments and
-//! output streams explicitly so that the whole CLI can be tested in-process.
-//! Argument parsing lives in [`cli`], process exit statuses in [`exit`] and
-//! user-facing errors in [`error`].
+//! The binary is a thin wrapper around [`run`], which takes the arguments,
+//! the standard streams and the detected [`Env`] explicitly, so the whole
+//! CLI (terminal detection and colour rules included) can be tested
+//! in-process.
+//!
+//! - [`cli`]: the clap definition, the single source for help, completions
+//!   and the man page;
+//! - [`input`]: input resolution and bounded reads;
+//! - [`diag`]: errors, warnings and notes on stderr;
+//! - [`env`](mod@env): terminal and environment detection;
+//! - [`error`] and [`exit`]: typed errors and the exit status contract.
 
 #![forbid(unsafe_code)]
 
 pub mod cli;
+pub mod diag;
+pub mod env;
 pub mod error;
 pub mod exit;
+mod generate;
+pub mod input;
+mod tooling;
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Read, Write};
 
-use clap::Parser as _;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::{CommandFactory as _, Parser as _};
+use qr_core::{sanitize_for_terminal, sanitize_lines_for_terminal};
 
 pub use crate::cli::Cli;
+use crate::cli::Command;
+use crate::diag::{Reporter, Verbosity};
+pub use crate::env::Env;
 pub use crate::error::CliError;
 pub use crate::exit::ExitStatus;
+use crate::generate::Generate;
 
-/// Runs the CLI with `args` (including the program name as the first item),
-/// writing normal output to `stdout` and diagnostics to `stderr`.
+/// The streams and environment one invocation runs against.
+pub struct Context<'a> {
+    /// Where input is read from when stdin is selected.
+    pub stdin: &'a mut dyn Read,
+    /// Where codes and other primary output go.
+    pub stdout: &'a mut dyn Write,
+    /// Where diagnostics go.
+    pub stderr: &'a mut dyn Write,
+    /// Terminal and environment facts.
+    pub env: Env,
+}
+
+/// Runs the CLI with `args` (including the program name as the first item).
 ///
-/// Errors are reported on `stderr` and converted into the matching
+/// Errors are reported on stderr and converted into the matching
 /// [`ExitStatus`]; this function never panics on bad input.
-pub fn run<I, T, O, E>(args: I, stdout: &mut O, stderr: &mut E) -> ExitStatus
+pub fn run<I, T>(args: I, ctx: &mut Context<'_>) -> ExitStatus
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
-    O: Write + ?Sized,
-    E: Write + ?Sized,
 {
-    match try_run(args, stdout, stderr) {
-        Ok(status) => status,
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(err) => return report_parse_error(&err, ctx),
+    };
+
+    let Context {
+        stdin,
+        stdout,
+        stderr,
+        env,
+    } = ctx;
+    let global = cli.global;
+    let mut reporter = Reporter::new(
+        &mut **stderr,
+        global.color.enabled(env.stderr_is_tty, env),
+        Verbosity::from_flags(global.quiet, global.verbose),
+    );
+
+    let result = match cli.command {
+        Some(Command::Completions { shell }) => tooling::completions(shell, &mut **stdout),
+        Some(Command::Man) => tooling::man(&mut **stdout),
+        None => Generate {
+            args: &cli.generate,
+            color: global.color,
+            env,
+            stdin: &mut **stdin,
+            stdout: &mut **stdout,
+            reporter: &mut reporter,
+        }
+        .run(),
+    }
+    .and_then(|()| stdout.flush().map_err(CliError::Output));
+
+    match result {
+        Ok(()) => ExitStatus::Success,
         Err(err) => {
-            // If stderr itself is unwritable there is nowhere left to report.
-            let _ = writeln!(stderr, "error: {err}");
+            reporter.error(&err.to_string(), err.hint().as_deref());
             err.exit_status()
         }
     }
 }
 
-fn try_run<I, T, O, E>(args: I, stdout: &mut O, stderr: &mut E) -> Result<ExitStatus, CliError>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<OsString> + Clone,
-    O: Write + ?Sized,
-    E: Write + ?Sized,
-{
-    let status = match Cli::try_parse_from(args) {
-        Ok(_cli) => ExitStatus::Success,
-        Err(err) => {
-            let rendered = err.render().to_string();
-            if err.use_stderr() {
-                // Best effort: a usage error is still a usage error even if
-                // it cannot be printed.
-                let _ = stderr.write_all(rendered.as_bytes());
-                ExitStatus::Usage
-            } else {
-                stdout
-                    .write_all(rendered.as_bytes())
-                    .map_err(CliError::Output)?;
-                ExitStatus::Success
+/// Prints a clap error (or `--help`/`--version` output) and picks the status.
+fn report_parse_error(err: &clap::Error, ctx: &mut Context<'_>) -> ExitStatus {
+    if let Some(extra) = extra_argument(err) {
+        // Best effort, as below. The argument is user data.
+        let _ = write!(
+            ctx.stderr,
+            "error: unexpected extra argument '{}'\n  \
+             hint: quote text that contains spaces: qr 'hello world'\n",
+            sanitize_for_terminal(&extra)
+        );
+        return ExitStatus::Usage;
+    }
+    let rendered = err.render().to_string();
+    if err.use_stderr() {
+        // Clap quotes the offending argument, which is user data.
+        // Best effort: a usage error is still a usage error even if it
+        // cannot be printed.
+        let _ = ctx
+            .stderr
+            .write_all(sanitize_lines_for_terminal(&rendered).as_bytes());
+        ExitStatus::Usage
+    } else {
+        let written = ctx
+            .stdout
+            .write_all(rendered.as_bytes())
+            .and_then(|()| ctx.stdout.flush());
+        match written {
+            Ok(()) => ExitStatus::Success,
+            Err(e) => {
+                let err = CliError::Output(e);
+                let _ = writeln!(ctx.stderr, "error: {err}");
+                err.exit_status()
             }
         }
+    }
+}
+
+/// The stray word in `qr hello world`, if that is what `err` is about.
+///
+/// With `args_conflicts_with_subcommands`, clap reads a second positional
+/// word as a subcommand and reports "the subcommand 'world' cannot be used
+/// with '[TEXT]'", even when no such subcommand exists. That is almost
+/// always unquoted text, so it gets a clearer message. A real subcommand
+/// name (`qr hello man`) keeps clap's own error.
+fn extra_argument(err: &clap::Error) -> Option<String> {
+    if err.kind() != ErrorKind::ArgumentConflict {
+        return None;
+    }
+    let Some(ContextValue::String(word)) = err.get(ContextKind::InvalidSubcommand) else {
+        return None;
     };
-    stdout.flush().map_err(CliError::Output)?;
-    Ok(status)
+    let mut command = Cli::command();
+    command.build();
+    let is_subcommand = command
+        .get_subcommands()
+        .any(|sub| sub.get_name() == word || sub.get_all_aliases().any(|alias| alias == word));
+    (!is_subcommand).then(|| word.clone())
 }
 
 #[cfg(test)]
-mod tests {
-    use std::io::{self, Write};
-
-    use super::{ExitStatus, run};
-
-    /// A writer that fails every operation, standing in for a closed pipe.
-    struct BrokenPipe;
-
-    impl Write for BrokenPipe {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
-        }
-    }
-
-    fn run_capture(args: &[&str]) -> (ExitStatus, String, String) {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let status = run(args.iter().copied(), &mut out, &mut err);
-        (
-            status,
-            String::from_utf8(out).unwrap(),
-            String::from_utf8(err).unwrap(),
-        )
-    }
-
-    #[test]
-    fn version_flags_print_name_and_version() {
-        let expected = format!("qr {}\n", env!("CARGO_PKG_VERSION"));
-        for flag in ["--version", "-V"] {
-            let (status, out, err) = run_capture(&["qr", flag]);
-            assert_eq!(status, ExitStatus::Success);
-            assert_eq!(out, expected);
-            assert_eq!(err, "");
-        }
-    }
-
-    #[test]
-    fn help_goes_to_stdout_and_succeeds() {
-        let (status, out, err) = run_capture(&["qr", "--help"]);
-        assert_eq!(status, ExitStatus::Success);
-        assert!(out.contains("Usage: qr"), "{out}");
-        assert_eq!(err, "");
-    }
-
-    #[test]
-    fn no_arguments_is_a_usage_error_with_help() {
-        let (status, out, err) = run_capture(&["qr"]);
-        assert_eq!(status, ExitStatus::Usage);
-        assert_eq!(out, "");
-        assert!(err.contains("Usage: qr"), "{err}");
-    }
-
-    #[test]
-    fn unknown_flag_is_a_usage_error() {
-        let (status, out, err) = run_capture(&["qr", "--definitely-not-a-flag"]);
-        assert_eq!(status, ExitStatus::Usage);
-        assert_eq!(out, "");
-        assert!(err.contains("--definitely-not-a-flag"), "{err}");
-    }
-
-    #[test]
-    fn unwritable_stdout_is_an_io_error() {
-        let mut err = Vec::new();
-        let status = run(["qr", "--version"], &mut BrokenPipe, &mut err);
-        assert_eq!(status, ExitStatus::Io);
-        let err = String::from_utf8(err).unwrap();
-        assert_eq!(err, "error: cannot write output: pipe closed\n");
-    }
-
-    #[test]
-    fn unwritable_stderr_still_reports_usage_status() {
-        let mut out = Vec::new();
-        let status = run(["qr", "--nope"], &mut out, &mut BrokenPipe);
-        assert_eq!(status, ExitStatus::Usage);
-        assert_eq!(out, b"");
-    }
-
-    #[test]
-    fn core_and_cli_versions_move_in_lockstep() {
-        assert_eq!(qr_core::VERSION, env!("CARGO_PKG_VERSION"));
-    }
-}
+mod tests;
