@@ -10,3 +10,18 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+fast_qr.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+proptest.workspace = true
+# Reference encoder for differential tests and the capacity-table cross-check.
+qrcode.workspace = true
+rqrr.workspace = true
+
+[[bench]]
+name = "encode"
+harness = false
