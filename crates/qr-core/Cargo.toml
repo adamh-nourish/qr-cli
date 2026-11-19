@@ -22,6 +22,8 @@ insta.workspace = true
 # Reference encoder for differential tests and the capacity-table cross-check.
 qrcode.workspace = true
 rqrr.workspace = true
+# Parses every generated SVG in the output-safety tests.
+roxmltree.workspace = true
 
 [[bench]]
 name = "encode"

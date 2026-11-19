@@ -1,9 +1,29 @@
 //! Renderers that turn a [`Matrix`](crate::Matrix) into output.
 //!
 //! Every renderer draws from the same module grid and adds the quiet zone
-//! itself. This module currently holds the text renderers (terminal,
-//! Unicode and ASCII); vector and raster renderers are added alongside them.
+//! itself. The text renderers (terminal, Unicode and ASCII) take
+//! [`TextOptions`]; the vector renderers (SVG, PDF and EPS) take
+//! [`RenderOptions`], which the raster renderers will share.
+//!
+//! The vector writers never pass user strings through: colours are written
+//! from the typed [`Color`](crate::Color), SVG is built by a typed XML writer
+//! that escapes every value, and PDF and PostScript strings are escaped.
 
+mod eps;
+mod escape;
+mod options;
+mod pdf;
+mod runs;
+mod svg;
 mod text;
+mod vector;
+mod xml;
 
+pub use self::eps::render_eps;
+pub use self::options::{
+    DEFAULT_SCALE, MAX_CANVAS_SIDE, MAX_TITLE_CHARS, RenderError, RenderOptions,
+};
+pub use self::pdf::{PDF_MAX_PAGE_SIDE, render_pdf};
+pub use self::svg::render_svg;
 pub use self::text::{DEFAULT_MARGIN, MAX_MARGIN, TextFormat, TextOptions, render_text};
+pub use self::vector::{UnknownVectorFormat, VectorFormat, render_vector};
