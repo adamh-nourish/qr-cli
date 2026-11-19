@@ -272,6 +272,10 @@ pub enum VersionChoice {
     /// The smallest version that fits the data and is at least this one.
     AtLeast(Version),
     /// Exactly this version; data that does not fit is an error.
+    ///
+    /// No v1 CLI flag maps to this (`--qr-version` is [`Self::AtLeast`]).
+    /// It exists for tests, benchmarks and library callers that need a
+    /// fixed symbol size.
     Exact(Version),
 }
 

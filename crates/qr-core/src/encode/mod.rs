@@ -43,7 +43,12 @@ pub struct EncodePlan {
     pub version: Version,
     /// The error correction level.
     pub ec_level: EcLevel,
-    /// A forced mask, or `None` to let the backend pick the lowest penalty.
+    /// A forced mask, or `None` to let the backend choose one.
+    ///
+    /// The backend's choice is its own penalty heuristic and is not
+    /// guaranteed to be the ISO/IEC 18004 minimum: `fast_qr` scores masks
+    /// before drawing format information and does not count runs through
+    /// function patterns. Every mask decodes; see DECISIONS.md section 1.
     pub mask: Option<Mask>,
 }
 
@@ -284,5 +289,23 @@ mod tests {
         assert_eq!(code.mask(), Mask::new(5).unwrap());
         assert_eq!(code.version(), v(1));
         assert_eq!(code.matrix().width(), 21);
+    }
+
+    /// Single-mode auto costs a version on mixed data: `qrcode`'s segmented
+    /// encoding fits this in version 1 (see `tests/differential.rs`). Pinned
+    /// so a change to segmentation or the backend is a deliberate diff.
+    #[test]
+    fn mixed_data_is_encoded_in_a_single_mode() {
+        let code = encode(b"tel:+441234567890", &EncodeOptions::default()).unwrap();
+        assert_eq!((code.mode(), code.version()), (Mode::Byte, v(2)));
+    }
+
+    /// Pins the backend's automatic mask for empty data at version 40, the
+    /// case where it differed from `qrcode` in the PR 2 bake-off.
+    #[test]
+    fn automatic_mask_for_empty_data_at_version_40_is_pinned() {
+        let o = EncodeOptions::default().with_version(VersionChoice::Exact(v(40)));
+        let code = encode(b"", &o).unwrap();
+        assert_eq!(code.mask().number(), 4);
     }
 }

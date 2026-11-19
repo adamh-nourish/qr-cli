@@ -39,10 +39,25 @@ fn encode_v20_by_ec_level(bencher: divan::Bencher, ec: EcLevel) {
     bencher.bench(|| encode(black_box(&data), black_box(&options)));
 }
 
-/// Forced mask: isolates mask selection cost from the rest of encoding.
+/// Forced mask. With `fast_qr` this is no faster than the automatic mask
+/// (v20: 336 µs vs 334 µs), so mask selection is not a meaningful cost for
+/// this backend; the group guards against a backend whose mask search is
+/// expensive (as `qrcode`'s is, see `qrcode_reference`).
 #[divan::bench(args = [5, 20, 40])]
 fn encode_fixed_mask(bencher: divan::Bencher, version: u8) {
     let (data, options) = full_payload(version, EcLevel::M);
     let options = options.with_mask(Mask::new(0));
     bencher.bench(|| encode(black_box(&data), black_box(&options)));
+}
+
+/// The PR 2 bake-off, kept in the repo so the data behind the backend choice
+/// stays tracked (DECISIONS.md sections 1 and 5): the dev-only `qrcode` crate
+/// on the same full payloads, automatic mask, EC level M. Compare with
+/// `encode_by_version`.
+#[divan::bench(args = [5, 20, 40])]
+fn qrcode_reference(bencher: divan::Bencher, version: u8) {
+    let (data, _) = full_payload(version, EcLevel::M);
+    let qr_version = qrcode::Version::Normal(i16::from(version));
+    bencher
+        .bench(|| qrcode::QrCode::with_version(black_box(&data), qr_version, qrcode::EcLevel::M));
 }

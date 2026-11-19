@@ -16,7 +16,7 @@
 | 10 | **Coverage per module ≥95%** (Security). `cargo llvm-cov` has no per-module gate. | A single **90% line gate** across the workspace. Integration tests run the real binary through `assert_cmd`, so `main.rs` does not need excluding. |
 | 11 | **Cargo feature flags per codec** (Performance). Every flag multiplies the build matrix. | **No optional features in v1.** All dependencies are pure Rust, and the binary-size gate is what keeps bloat out. |
 | 12 | **JPEG output.** DA says cut it (lossy); UX keeps it. | **Keep it** at quality 92 with a minimum scale of 4. The user asked for comprehensive output, the artefacts are negligible at that scale, and `--verify` covers the rest. |
-| 13 | **`--mask`.** UX assumes the encoder supports it; that has not been checked against `qrcode`. | It ships only if PR 2's bake-off confirms the encoder supports it. Otherwise it is deferred. |
+| 13 | **`--mask`.** UX assumes the encoder supports it; that has not been checked against `qrcode`. | It ships only if PR 2's bake-off confirms the encoder supports it. Otherwise it is deferred. **PR 2: confirmed** for `fast_qr` (forced masks are honoured and the chosen mask is reported), so `--mask 0..7` ships in PR 3. |
 
 ## 1. Language and crates
 
@@ -28,7 +28,13 @@
 
 **Crates:**
 - **CLI:** `clap` 4.5 (derive), `clap_complete` 4.5, `clap_mangen` 0.2, `anstream`/`anstyle`, `terminal_size` 0.4.
-- **Encoding and decoding:** `qrcode` 0.14 behind a `QrEncoder` trait. `fast_qr` is swapped in only if it is more than 3× faster at v20+ **and** passes the same round-trip vectors. Decoding uses `rqrr` 0.9.
+- **Encoding and decoding:** `fast_qr` 0.14 (`default-features = false`) is the production encoder, behind a `QrEncoder` trait. `qrcode` 0.14 is a **dev-dependency only**: the differential oracle, the capacity-table cross-check and the `qrcode_reference` bench group. Decoding uses `rqrr` 0.9.
+  - **Original rule:** swap to `fast_qr` only if it is more than 3× faster at v20+ **and** passes the same round-trip vectors. PR 2 met both: automatic-mask encode at EC M is about 12× faster (`benches/encode.rs`, M4 Pro: v5 47 µs vs 439 µs, v20 294 µs vs 3.72 ms, v40 1.01 ms vs 12.9 ms), all output round-trips through `rqrr`, and with a forced mask the matrices are bit-identical to `qrcode`'s.
+  - **The rule did not cover symbol size or mask choice. The swap trades both for encode speed:**
+    - **No mixed-mode segmentation.** `plan()` picks one mode for the whole input, while `qrcode` segments optimally. At EC M (`tests/differential.rs` pins these): `tel:+441234567890` v2 vs v1; `SMSTO:+447700900123:Hello there` v3 vs v2; a 43-byte URL ending in a 16-digit id v4 vs v3; `order-` + 200 digits v10 vs v6; `ref:` + 1,000 digits v26 vs v16. WiFi, `geo:`, an upper-case URL and a short vCard came out the same. The capacity ceiling drops for mixed data as well: `ref:` + 5,000 digits is `DataTooLong` at L, but fits `qrcode` at v40.
+    - **Automatic mask is not the ISO minimum.** `fast_qr` scores masks before drawing format information and resets its run (N1) penalty at function modules. On 400 seeded random byte inputs (0–600 bytes, EC M, same version and mode) its matrix matched `qrcode`'s in 273/400 (68%); review measured 278/400 and, under an independent ISO penalty, `fast_qr` chose the minimum in 197/300 vs `qrcode`'s 295/300. Every mask decodes, so this is a small scan-robustness cost, not a correctness bug.
+  - **Is the speed needed?** One-shot encode is under 1 ms with either crate at typical sizes, and `qrcode` meets the §5 batch target up to about v10. `fast_qr` only changes the outcome for v20+ batches, while segmentation affects every tel/sms/URL-with-id code.
+  - **Status: owner sign-off on this trade is pending on PR 2.** If the owner prefers `qrcode`, the swap back is a second ~40-line backend behind the same trait, plus segment-aware sizing in `plan()`/`capacity`. Adding segmentation in front of `fast_qr` is the other way to close the size gap.
 - **Raster:** `png` 0.17 (indexed or 1-bit output) and `jpeg-encoder` 0.6. `image` 0.25 with `default-features=false` and only `png`, `jpeg` and `webp` is used to *read* logos and decode inputs and to encode lossless WebP.
 - **Batch, files and parsing:** `rayon` 1.10 (batch path only), `csv` 1.3, `tempfile` 3, `serde`/`serde_json` 1, `thiserror` 2.
 - **Dev:** `proptest` 1, `assert_cmd` 2, `predicates` 3, `insta` 1, `roxmltree` 0.20, `divan` (pick one; no criterion).
@@ -181,7 +187,7 @@ Engineer **A** owns core and rendering. Engineer **B** owns CLI, I/O and infrast
 | # | Title | Scope | Owner | Depends on |
 |---|---|---|---|---|
 | 1 | `ci: scaffold workspace and CI gates` | Workspace, toolchain, lints, LICENSE (MIT OR Apache-2.0), SECURITY.md, deny.toml, ci.yml (all §7 checks except `dist plan`), Dependabot, a stub `qr --version`, release profile (`lto="fat"`, `codegen-units=1`, `strip`, `panic="abort"`) | B | none |
-| 2 | `feat(core): encoder trait, matrix, capacity errors` | `QrEncoder` over qrcode; EC, version and mode; exact capacity errors; proptest round-trip through rqrr; divan skeleton. The PR description records the fast_qr bake-off data and the `--mask` finding. | A | 1 |
+| 2 | `feat(core): encoder trait, matrix, capacity errors` | `QrEncoder` over fast_qr (qrcode as dev-only oracle, §1); EC, version and mode; exact capacity errors; proptest round-trip through rqrr; divan skeleton. The PR description records the fast_qr bake-off data and the `--mask` finding. | A | 1 |
 | 3 | `feat(cli): default generate command and text renderers` | Input resolution, newline handling, terminal, text and ascii renderers, error type and exit codes, `sanitize_for_terminal`, `--color`, `completions`, `man` | B | 2 |
 | 4 | `feat(core): vector renderers (svg, pdf, eps) and Color` | Typed SVG writer, PDF and EPS emitters, Color parsing, the XML safety test | A | 2 (built in parallel with 3) |
 | 5 | `feat(cli): file output pipeline` | `-o`/`-f` inference, atomic write, `--no-clobber`, stdout and TTY rules, `--json`, `--data-uri`; wires in PR 4 | B | 3, 4 |
@@ -202,7 +208,7 @@ Engineer **A** owns core and rendering. Engineer **B** owns CLI, I/O and infrast
 
 1. **Required checks on a private repo.** If the repo is private on GitHub Free, required status checks and branch protection are unavailable, so CI is enforced only by convention. Anonymous installers also return 404. The user must decide public vs private. Creating a public repo publishes code, so it needs their explicit yes.
 2. **Verify false negatives.** rqrr is weaker than phone scanners, particularly on `dots` and logo codes. Auto-verify could therefore reject codes that scan fine. Before PR 7 merges, measure the rqrr failure rate on a corpus of 200 styled codes. If it is above 2%, auto-verify warns instead of failing.
-3. **qrcode crate maintenance and API.** Releases are infrequent, and mask selection is unconfirmed. The encoder trait limits the impact; PR 2 delivers the evidence.
+3. **fast_qr maintenance.** The production encoder has a single maintainer, and its mask scoring has already needed a fix: a comment in `placement.rs` records that columns were scored on a transpose taken before masking, so vertical penalties never influenced the chosen mask. Its scoring still differs from ISO (see §1). Mitigations: the `QrEncoder` trait keeps a swap to `qrcode` small; `tests/differential.rs` checks forced-mask matrices bit for bit against `qrcode` and pins the auto-mask agreement and segmentation gap; every encode round-trips through `rqrr` in tests. `--mask` is supported (forced masks are honoured and reported).
 4. **Crate name.** `qr-cli` on crates.io may be taken. Check before going public and reserve a fallback name.
 5. **Subcommand ambiguity.** Text such as `email` is parsed as a subcommand. It is documented, and `--` escapes it, but users can still be surprised.
 6. **Stack rebase churn.** 12 stacked PRs with squash merges mean repeated rebases. Keep each PR under about 400 changed lines.

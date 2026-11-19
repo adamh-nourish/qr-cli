@@ -1,8 +1,13 @@
 //! The production backend, built on the `fast_qr` crate.
 //!
 //! `fast_qr` was chosen over `qrcode` by the PR 2 bake-off: on the default
-//! path (automatic mask) it was more than 10x faster at versions 20 and 40 and
-//! decoded identically on the round-trip vectors. See `DECISIONS.md` section 1.
+//! path (automatic mask) it is about 11x faster at versions 20 and 40, all of
+//! its output round-trips through `rqrr`, and with a forced mask its matrices
+//! are bit-identical to `qrcode`'s. With the automatic mask the two crates
+//! often pick different (equally decodable) masks, and auto mode here does not
+//! segment mixed data, so some payloads need a larger version. Both
+//! trade-offs are measured in `tests/differential.rs` and recorded in
+//! `DECISIONS.md` section 1.
 
 use fast_qr::{ECL, QRBuilder};
 

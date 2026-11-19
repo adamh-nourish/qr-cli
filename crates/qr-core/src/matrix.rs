@@ -24,8 +24,9 @@ pub enum MatrixError {
 ///
 /// Coordinates are `(x, y)` with the origin at the top-left corner, `x`
 /// growing to the right and `y` growing downwards. The grid does not include
-/// a quiet zone; renderers add the margin themselves, which
-/// [`Matrix::is_dark`] supports by treating out-of-range coordinates as light.
+/// a quiet zone. Renderers add the margin themselves:
+/// [`Matrix::is_dark_with_margin`] reads a module in a frame padded by
+/// `margin` light modules on every side, so no edge needs a special case.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Matrix {
     width: usize,
@@ -80,6 +81,24 @@ impl Matrix {
     /// are light, matching the quiet zone around a symbol.
     pub fn is_dark(&self, x: usize, y: usize) -> bool {
         self.get(x, y).unwrap_or(false)
+    }
+
+    /// Whether the module at `(x, y)` is dark, where the coordinates are in
+    /// a frame that adds `margin` light modules on every side of the grid.
+    /// The padded frame is `width + 2 * margin` modules across.
+    ///
+    /// ```
+    /// use qr_core::Matrix;
+    /// let m = Matrix::from_modules(1, vec![true]).unwrap();
+    /// assert!(!m.is_dark_with_margin(0, 0, 1)); // top-left quiet zone
+    /// assert!(m.is_dark_with_margin(1, 1, 1)); // the single module
+    /// assert!(!m.is_dark_with_margin(2, 2, 1)); // bottom-right quiet zone
+    /// ```
+    pub fn is_dark_with_margin(&self, x: usize, y: usize, margin: usize) -> bool {
+        match (x.checked_sub(margin), y.checked_sub(margin)) {
+            (Some(x), Some(y)) => self.is_dark(x, y),
+            _ => false,
+        }
     }
 
     /// The modules in row-major order.
@@ -158,6 +177,23 @@ mod tests {
         assert!(!m.is_dark(10, 10));
         assert_eq!(m.dark_count(), 5);
         assert_eq!(m.modules().len(), 9);
+    }
+
+    #[test]
+    fn margin_frame_pads_every_side_with_light_modules() {
+        let m = sample();
+        let margin = 2;
+        let padded = m.width() + 2 * margin;
+        for y in 0..padded {
+            for x in 0..padded {
+                let inside = (margin..margin + m.width()).contains(&x)
+                    && (margin..margin + m.width()).contains(&y);
+                let expected = inside && m.is_dark(x - margin, y - margin);
+                assert_eq!(m.is_dark_with_margin(x, y, margin), expected, "({x}, {y})");
+            }
+        }
+        // Margin 0 is the plain grid.
+        assert!(m.is_dark_with_margin(0, 0, 0));
     }
 
     #[test]
