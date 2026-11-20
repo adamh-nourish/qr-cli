@@ -81,7 +81,7 @@ pub(crate) fn warn_contrast(
 
 /// `options` as the renderer draws them: JPEG has no alpha channel, so its
 /// colours are flattened onto white, transparent background included.
-fn as_drawn(options: &RenderOptions, renderer: Renderer) -> RenderOptions {
+pub(crate) fn as_drawn(options: &RenderOptions, renderer: Renderer) -> RenderOptions {
     match renderer {
         Renderer::Raster(format) if !format.has_alpha() => options
             .clone()

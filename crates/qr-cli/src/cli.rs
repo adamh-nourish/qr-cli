@@ -28,6 +28,8 @@ Examples:
   qr 'hi' -o code.svg          Write an SVG file (format from the extension)
   qr 'hi' --size 512 -o c.png  Write a 512x512 PNG image
   qr 'hi' -f pdf -o - > c.pdf  Write a PDF to stdout
+  qr 'hi' --shape dots --fg navy -o c.png
+                               Write a styled PNG (checked automatically)
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr -- help                   Encode a word that is also a command name,
                                such as 'help', 'man' or 'completions'
@@ -174,14 +176,15 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub invert: bool,
 
-    /// How dark modules are drawn in images; the three finder patterns stay
-    /// square.
+    /// How dark modules are drawn in png, jpeg, webp, svg, pdf and eps
+    /// output; the three finder patterns stay square.
     #[arg(long, value_enum, value_name = "SHAPE", default_value_t = Shape::Square)]
     pub shape: Shape,
 
     /// Read the rendered code back with a decoder and fail (exit 6) unless it
-    /// holds the input. Automatic for --shape, --fg, --bg, --transparent and
-    /// --invert images.
+    /// holds the input. Automatic for images with a non-default
+    /// --shape/--fg/--bg, --transparent or --invert. Text output is checked
+    /// as a plain module grid (the symbol, not the characters).
     #[arg(long, overrides_with = "no_verify")]
     pub verify: bool,
 

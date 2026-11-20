@@ -9,12 +9,13 @@
 //! styled codes is at most 2%, and warn otherwise.
 
 use qr_core::verify::{Verified, VerifyError, verify_raster, verify_rendering};
-use qr_core::{Matrix, RenderOptions};
+use qr_core::{Color, Matrix, ModuleShape, RenderOptions};
 
 use crate::cli::GenerateArgs;
 use crate::diag::Reporter;
 use crate::error::CliError;
 use crate::output::Renderer;
+use crate::style::as_drawn;
 
 /// What an automatic check does when the code does not read back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,71 @@ pub(crate) enum OnAutoFailure {
 /// codes in `qr-core/tests/verify_corpus.rs` (0.0%, under the 2% limit),
 /// so an automatic check fails like an explicit one.
 pub(crate) const AUTO_VERIFY: OnAutoFailure = OnAutoFailure::Fail;
+
+/// The one change most likely to make a code that failed its check read
+/// back, chosen from what is known about how it was drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedy {
+    /// The colours, as drawn, are below [`qr_core::MIN_CONTRAST`]: neither
+    /// error correction nor size helps.
+    Contrast,
+    /// A raster image, which is read at its own size: bigger modules help.
+    Raster {
+        /// Whether `--size` set the size (so `--scale` would be ignored).
+        sized: bool,
+        /// Whether the modules are already square.
+        square: bool,
+    },
+    /// Vector or text output, which is always read at
+    /// [`qr_core::verify::VERIFY_SCALE`], so `--scale` cannot help.
+    Other {
+        /// Whether the modules are already square.
+        square: bool,
+    },
+}
+
+impl Remedy {
+    /// The remedy for `subject`.
+    pub(crate) fn for_subject(subject: &Subject<'_>) -> Self {
+        let options = subject.options;
+        let square = options.shape == ModuleShape::Square;
+        match subject.renderer {
+            // Text is checked as plain black on white.
+            Renderer::Text => Self::Other { square: true },
+            renderer if as_drawn(options, renderer).contrast().is_low() => Self::Contrast,
+            Renderer::Raster(_) => Self::Raster {
+                sized: options.size.is_some(),
+                square,
+            },
+            Renderer::Vector(_) => Self::Other { square },
+        }
+    }
+
+    /// The hint for this remedy.
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::Contrast => "use a darker --fg or a lighter --bg",
+            Self::Raster {
+                sized: false,
+                square: false,
+            } => "try a larger --scale or --shape square",
+            Self::Raster {
+                sized: false,
+                square: true,
+            } => "try a larger --scale",
+            Self::Raster {
+                sized: true,
+                square: false,
+            } => "try a larger --size or --shape square",
+            Self::Raster {
+                sized: true,
+                square: true,
+            } => "try a larger --size",
+            Self::Other { square: false } => "try --ec H or --shape square",
+            Self::Other { square: true } => "try --ec H",
+        }
+    }
+}
 
 /// Whether and why a code is verified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,20 +158,24 @@ pub(crate) fn run(
     }
     match check(subject) {
         Ok(verified) => {
-            reporter.note("verified", &describe(subject.format, verified));
+            reporter.note("verified", &describe(subject, verified));
             Ok(Some(true))
         }
         Err(err) if err.is_failure() && mode == Mode::Auto && on_auto == OnAutoFailure::Warn => {
             reporter.warn(
                 "verification_failed",
                 &format!("{err}; writing it anyway"),
-                Some("check that it scans, or try --ec H or --shape square"),
+                Some(&format!(
+                    "check that it scans, or {}",
+                    Remedy::for_subject(subject).hint()
+                )),
             );
             Ok(Some(false))
         }
         Err(err) => Err(CliError::Verify {
             error: err,
             automatic: mode == Mode::Auto,
+            remedy: Remedy::for_subject(subject),
         }),
     }
 }
@@ -135,8 +205,8 @@ fn check(subject: &Subject<'_>) -> Result<Verified, VerifyError> {
     }
 }
 
-/// The `-v` note for a successful check.
-fn describe(format: &str, verified: Verified) -> String {
+/// The `-v` note for a successful check of `subject`.
+fn describe(subject: &Subject<'_>, verified: Verified) -> String {
     let side = verified.side;
     let how = if verified.redrawn {
         format!("drawn at {side}x{side} px")
@@ -148,7 +218,23 @@ fn describe(format: &str, verified: Verified) -> String {
     } else {
         ""
     };
-    format!("verified: the {format} output reads back as the input ({how}{inverted})")
+    // A transparent image is read as if placed on its --bg colour (JPEG has
+    // no transparency and text no colours); on another page it may differ.
+    let backdrop = match subject.renderer {
+        Renderer::Raster(format) if !format.has_alpha() => None,
+        Renderer::Text => None,
+        Renderer::Raster(_) | Renderer::Vector(_) => subject.options.transparent.then(|| {
+            format!(
+                ", transparency read on {} (--bg)",
+                subject.options.bg.over(Color::WHITE)
+            )
+        }),
+    }
+    .unwrap_or_default();
+    format!(
+        "verified: the {} output reads back as the input ({how}{inverted}{backdrop})",
+        subject.format
+    )
 }
 
 #[cfg(test)]
@@ -252,6 +338,18 @@ mod tests {
             err.contains("(drawn at 290x290 px, read as light on dark)"),
             "{err}"
         );
+        let (result, err) = outcome(
+            Mode::Explicit,
+            OnAutoFailure::Fail,
+            b"",
+            SVG,
+            &inverted.clone().with_transparent(true),
+        );
+        assert_eq!(result.unwrap(), Some(true));
+        assert!(
+            err.contains("read as light on dark, transparency read on #000000 (--bg))"),
+            "{err}"
+        );
         let (result, _) = outcome(
             Mode::Explicit,
             OnAutoFailure::Fail,
@@ -260,6 +358,58 @@ mod tests {
             &inverted,
         );
         assert_eq!(result.unwrap(), Some(true));
+    }
+
+    #[test]
+    fn the_hint_follows_what_is_known_about_the_drawing() {
+        let code = encode(b"data", &EncodeOptions::default()).unwrap();
+        let remedy = |renderer, options: &RenderOptions| {
+            Remedy::for_subject(&Subject {
+                matrix: code.matrix(),
+                renderer,
+                format: "x",
+                rendered: b"",
+                options,
+                data: b"data",
+            })
+        };
+        let pale = RenderOptions::default().with_fg(Color::rgb(0xdd, 0xdd, 0xdd));
+        let dots = RenderOptions::default().with_shape(ModuleShape::Dots);
+        let jpeg = Renderer::Raster(RasterFormat::Jpeg);
+        // A transparent background is drawn on white in a JPEG: white on
+        // transparent white is invisible there.
+        let ghost = RenderOptions::default()
+            .with_fg(Color::WHITE)
+            .with_bg(Color::BLACK)
+            .with_transparent(true);
+        let table = [
+            (SVG, &pale, "use a darker --fg or a lighter --bg"),
+            (PNG, &pale, "use a darker --fg or a lighter --bg"),
+            (jpeg, &ghost, "use a darker --fg or a lighter --bg"),
+            (PNG, &ghost, "try a larger --scale"),
+            (SVG, &dots, "try --ec H or --shape square"),
+            (SVG, &RenderOptions::default(), "try --ec H"),
+            (PNG, &dots, "try a larger --scale or --shape square"),
+            (
+                PNG,
+                &dots.clone().with_size(Some(64)),
+                "try a larger --size or --shape square",
+            ),
+            (
+                PNG,
+                &RenderOptions::default().with_size(Some(64)),
+                "try a larger --size",
+            ),
+            // Text is checked as plain black on white, whatever the colours.
+            (Renderer::Text, &pale, "try --ec H"),
+        ];
+        for (renderer, options, hint) in table {
+            assert_eq!(
+                remedy(renderer, options).hint(),
+                hint,
+                "{renderer:?} {options:?}"
+            );
+        }
     }
 
     #[test]
@@ -285,8 +435,8 @@ mod tests {
         assert_eq!(
             err,
             "warning: the rendered png reads back as 10 bytes that differ from the 4 bytes \
-             encoded; writing it anyway\n  hint: check that it scans, or try --ec H or \
-             --shape square\n"
+             encoded; writing it anyway\n  hint: check that it scans, or try a larger \
+             --scale\n"
         );
 
         // A broken image is a bug, whatever the policy.

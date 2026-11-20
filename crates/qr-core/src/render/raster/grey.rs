@@ -1,5 +1,6 @@
-//! An 8-bit greyscale bitmap of the canvas, for reading a code back with a
-//! decoder (see [`crate::verify`]) without encoding and decoding a file.
+//! 8-bit greyscale views of the canvas and of decoded images, for reading a
+//! code back with a decoder (see [`crate::verify`]) without encoding and
+//! decoding a file.
 
 use super::canvas::Canvas;
 use super::paint::Paint;
@@ -16,39 +17,44 @@ pub(crate) struct GreyImage {
     pub(crate) pixels: Vec<u8>,
 }
 
-/// Draws `matrix` with `options` (shapes and colours included) flattened
-/// onto the opaque `backdrop`, as a scanner would see it printed.
-///
-/// # Errors
-///
-/// Returns [`RenderError`] if the options break a size limit or the buffer
-/// cannot be allocated.
-pub(crate) fn greyscale(
-    matrix: &Matrix,
-    options: &RenderOptions,
-    backdrop: Color,
-) -> Result<GreyImage, RenderError> {
-    let canvas = Canvas::new(matrix, options, "verify", 1)?;
-    let paint = Paint::new(options).flattened(backdrop);
-    let side = canvas.side();
-    let len = u64::from(side) * u64::from(side);
-    let mut pixels = Vec::new();
-    usize::try_from(len)
-        .ok()
-        .and_then(|len| pixels.try_reserve_exact(len).ok())
-        .ok_or_else(|| RenderError::Encoder {
-            format: "verify",
-            message: format!("cannot allocate {len} bytes for the image"),
-        })?;
-    let (light, dark) = (luma(paint.light), luma(paint.dark));
-    canvas.for_each_row(
-        |y, row: &mut Vec<u8>| canvas.fill_row(y, light, dark, row),
-        |row| {
-            pixels.extend_from_slice(row);
-            Ok::<(), RenderError>(())
-        },
-    )?;
-    Ok(GreyImage { side, pixels })
+/// `matrix` drawn with `options` (shapes and colours included) flattened
+/// onto an opaque backdrop, as a scanner would see it printed, produced a
+/// row at a time so that no full-size bitmap is held.
+pub(crate) struct GreyRows<'m> {
+    canvas: Canvas<'m>,
+    light: u8,
+    dark: u8,
+}
+
+impl<'m> GreyRows<'m> {
+    /// The drawing of `matrix` with `options` on `backdrop`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError`] if the options break a size limit.
+    pub(crate) fn new(
+        matrix: &'m Matrix,
+        options: &RenderOptions,
+        backdrop: Color,
+    ) -> Result<Self, RenderError> {
+        let canvas = Canvas::new(matrix, options, "verify", 1)?;
+        let paint = Paint::new(options).flattened(backdrop);
+        Ok(Self {
+            canvas,
+            light: luma(paint.light),
+            dark: luma(paint.dark),
+        })
+    }
+
+    /// Width and height in pixels.
+    pub(crate) fn side(&self) -> u32 {
+        self.canvas.side()
+    }
+
+    /// Replaces `out` with the luma values of row `y`.
+    pub(crate) fn fill_row(&self, y: u32, out: &mut Vec<u8>) {
+        self.canvas.fill_row(y, self.light, self.dark, out);
+    }
 }
 
 /// The Rec. 601 luma of an opaque colour, as most decoders compute it.
@@ -62,6 +68,23 @@ pub(crate) fn luma(color: Color) -> u8 {
 mod tests {
     use super::*;
     use crate::render::shape::ModuleShape;
+
+    /// The whole drawing as one bitmap.
+    fn greyscale(
+        matrix: &Matrix,
+        options: &RenderOptions,
+        backdrop: Color,
+    ) -> Result<GreyImage, RenderError> {
+        let rows = GreyRows::new(matrix, options, backdrop)?;
+        let side = rows.side();
+        let mut pixels = Vec::new();
+        let mut row = Vec::new();
+        for y in 0..side {
+            rows.fill_row(y, &mut row);
+            pixels.extend_from_slice(&row);
+        }
+        Ok(GreyImage { side, pixels })
+    }
 
     #[test]
     fn draws_the_canvas_in_grey() {

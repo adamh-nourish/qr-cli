@@ -9,7 +9,15 @@
 //!
 //! A second, harsher corpus (one to three pixels per module, quiet zones of
 //! zero or one module, contrast down to 3:1) checks that verification stays
-//! reliable, and that it never hands `rqrr` an image it would panic on.
+//! reliable, and that it never hands `rqrr` an image it would panic on. It
+//! is a low-contrast and thin-margin measurement more than a shape one:
+//! below about four pixels per module the shapes collapse to squares (dots
+//! and rounded raster output at one and two pixels, and rounded at three,
+//! are pixel-identical to square), so the report counts cases by the
+//! geometry actually drawn.
+//!
+//! Both corpora stop at payloads of about 250 bytes (versions up to about
+//! 13), so a third, smaller stratum covers versions 20 to 40.
 //!
 //! Run `cargo test -p qr-core --test verify_corpus -- --nocapture` to print
 //! the breakdown.
@@ -201,22 +209,48 @@ fn check(case: &Case) -> Result<(), String> {
     })
 }
 
+/// The shape `case` is actually drawn with: a raster image whose modules
+/// are too small for its shape to show is pixel-identical to a square one.
+fn effective_shape(case: &Case) -> String {
+    let shape = case.options.shape;
+    let Some(format) = case.format else {
+        return shape.to_string();
+    };
+    if shape == ModuleShape::Square {
+        return shape.to_string();
+    }
+    let code = encode(&case.data, &EncodeOptions::default().with_ec_level(case.ec)).unwrap();
+    let styled = render_raster(code.matrix(), format, &case.options).unwrap();
+    let square = case.options.clone().with_shape(ModuleShape::Square);
+    if render_raster(code.matrix(), format, &square).unwrap() == styled {
+        format!("{shape} (drawn square)")
+    } else {
+        shape.to_string()
+    }
+}
+
 /// Verifies every case of `spec`, prints a report and returns the
 /// false-negative rate.
 fn measure(name: &str, spec: &Spec<'_>) -> f64 {
     let cases = corpus(spec);
     assert_eq!(cases.len(), CORPUS);
+    report(name, &cases)
+}
+
+/// Verifies `cases`, prints a report by the geometry actually drawn and
+/// returns the false-negative rate.
+fn report(name: &str, cases: &[Case]) -> f64 {
     let mut by_shape: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut failures = Vec::new();
-    for case in &cases {
-        let entry = by_shape.entry(case.options.shape.to_string()).or_default();
+    for case in cases {
+        let entry = by_shape.entry(effective_shape(case)).or_default();
         entry.0 += 1;
         if let Err(why) = check(case) {
             entry.1 += 1;
             failures.push(why);
         }
     }
-    let rate = failures.len() as f64 / cases.len() as f64;
+    let rate = failures.len() as f64 / cases.len().max(1) as f64;
     println!(
         "{name}: rqrr false negatives: {} of {} styled codes ({:.1}%)",
         failures.len(),
@@ -249,6 +283,58 @@ fn harsh_corpus_reads_back_without_panicking() {
     assert!(
         rate <= MAX_FALSE_NEGATIVE_RATE,
         "the harsh false-negative rate is {:.1}%",
+        rate * 100.0
+    );
+}
+
+/// Versions 20 to 40 (payloads of 700 to 2,300 bytes), every shape and
+/// output path, at the module sizes a large code is printed at.
+fn high_versions() -> Vec<Case> {
+    let mut rng = Rng(0x7a11_c0de);
+    let formats = [
+        Some(RasterFormat::Png),
+        Some(RasterFormat::Jpeg),
+        Some(RasterFormat::Webp),
+        None,
+    ];
+    let mut cases = Vec::new();
+    for (i, len) in [700, 1_000, 1_500, 2_300].into_iter().enumerate() {
+        for (j, shape) in ModuleShape::ALL.into_iter().enumerate() {
+            let (fg, bg) = rng.pick(&PALETTE);
+            cases.push(Case {
+                data: (0..len).map(|_| rng.next() as u8).collect(),
+                ec: EcLevel::M,
+                options: RenderOptions::default()
+                    .with_shape(shape)
+                    .with_fg(fg)
+                    .with_bg(bg)
+                    .with_scale(rng.pick(&[4, 5, 6]))
+                    .with_margin(rng.pick(&[4, 2])),
+                format: formats[(i + j) % formats.len()],
+            });
+        }
+    }
+    cases
+}
+
+#[test]
+fn high_versions_read_back() {
+    let cases = high_versions();
+    let versions: Vec<u8> = cases
+        .iter()
+        .map(|c| {
+            encode(&c.data, &EncodeOptions::default().with_ec_level(c.ec))
+                .unwrap()
+                .version()
+                .number()
+        })
+        .collect();
+    assert!(versions.iter().all(|v| *v >= 20), "{versions:?}");
+    assert!(versions.contains(&40), "{versions:?}");
+    let rate = report("high versions", &cases);
+    assert!(
+        rate <= MAX_FALSE_NEGATIVE_RATE,
+        "the high-version false-negative rate is {:.1}%",
         rate * 100.0
     );
 }

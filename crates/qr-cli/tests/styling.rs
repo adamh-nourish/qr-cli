@@ -88,9 +88,8 @@ fn invisible_codes_fail_verification_and_write_nothing() {
         ))
         .stderr(predicate::str::contains(
             "error: no QR code could be read back from the rendered png\n  \
-             hint: styled codes are checked automatically",
-        ))
-        .stderr(predicate::str::contains("--no-verify to write it anyway"));
+             hint: use a darker --fg or a lighter --bg (or --no-verify to write it anyway)\n",
+        ));
     assert!(!path.exists(), "a failing code must not be written");
 
     // --no-verify writes it anyway, still with the warning.
@@ -114,8 +113,31 @@ fn invisible_codes_fail_verification_and_write_nothing() {
     assert_eq!(
         stderr,
         "error: no QR code could be read back from the rendered pdf\n  \
-         hint: try --ec H, a larger --scale, --shape square or stronger colours\n"
+         hint: use a darker --fg or a lighter --bg\n"
     );
+}
+
+#[test]
+fn a_low_contrast_vector_code_gets_the_contrast_hint() {
+    // Vector output is always read at 10 px per module, so --scale cannot
+    // help, and --ec H cannot fix low contrast: the hint names the colours.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pale.svg");
+    let assert = qr()
+        .args(["--fg", "#ddd", "-f", "svg", "hello", "-o"])
+        .arg(&path)
+        .assert()
+        .code(6);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert_eq!(
+        stderr,
+        "warning: the colours have a contrast ratio of 1.3:1 (#dddddd on #ffffff), below the \
+         3:1 scanners need\n  hint: use a darker --fg or a lighter --bg\n\
+         error: no QR code could be read back from the rendered svg\n  \
+         hint: use a darker --fg or a lighter --bg (or --no-verify to write it anyway)\n"
+    );
+    assert!(!stderr.contains("--scale"));
+    assert!(!path.exists());
 }
 
 #[test]

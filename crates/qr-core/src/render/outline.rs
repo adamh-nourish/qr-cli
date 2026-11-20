@@ -278,6 +278,139 @@ mod tests {
         );
     }
 
+    /// `primitive` flattened to a polygon, curves cut into short lines.
+    fn polygon(primitive: Primitive) -> Vec<Point> {
+        let mut points = Vec::new();
+        match primitive {
+            Primitive::Rect(run) => {
+                let (x0, y0) = (f64::from(run.x), f64::from(run.y));
+                let x1 = x0 + f64::from(run.len);
+                points.extend([
+                    Point::new(x0, y0),
+                    Point::new(x1, y0),
+                    Point::new(x1, y0 + 1.0),
+                    Point::new(x0, y0 + 1.0),
+                ]);
+            }
+            Primitive::Shape(kind) => {
+                let mut at = Point::new(0.0, 0.0);
+                kind.outline(|segment| match segment {
+                    Segment::Move(p) | Segment::Line(p) => {
+                        points.push(p);
+                        at = p;
+                    }
+                    Segment::Cubic(c1, c2, end) => {
+                        for step in 1..=32 {
+                            let t = f64::from(step) / 32.0;
+                            let u = 1.0 - t;
+                            // The Bernstein weights of the four points.
+                            let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+                            points.push(Point::new(
+                                w[0] * at.x + w[1] * c1.x + w[2] * c2.x + w[3] * end.x,
+                                w[0] * at.y + w[1] * c1.y + w[2] * c2.y + w[3] * end.y,
+                            ));
+                        }
+                        at = end;
+                    }
+                    Segment::Close => {}
+                });
+            }
+        }
+        points
+    }
+
+    /// Even-odd point-in-polygon test.
+    fn inside(polygon: &[Point], p: Point) -> bool {
+        let mut inside = false;
+        let mut j = polygon.len() - 1;
+        for i in 0..polygon.len() {
+            let (a, b) = (polygon[i], polygon[j]);
+            if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+                inside = !inside;
+            }
+            j = i;
+        }
+        inside
+    }
+
+    /// The vector outlines and the raster glyphs (which `--verify` redraws
+    /// vector output with) agree at every pixel centre, for every shape and
+    /// module size, except within a hair of a curved edge, where the Bézier
+    /// approximation of a circle (off by under 0.03%) and the flattening
+    /// differ from the exact circle the raster renderer samples.
+    #[test]
+    fn outlines_match_the_raster_glyphs_at_pixel_centres() {
+        use crate::render::shape::Glyph;
+        use crate::{EncodeOptions, encode};
+        let code = encode(b"outline vs glyph", &EncodeOptions::default()).unwrap();
+        let matrix = code.matrix();
+        let width = matrix.width();
+        for shape in ModuleShape::ALL {
+            // Polygons by the modules they span, so each pixel is only
+            // tested against its own module's.
+            let mut cells: Vec<Vec<usize>> = vec![Vec::new(); width * width];
+            let mut polygons = Vec::new();
+            for primitive in primitives(matrix, shape, 0) {
+                let (x, y, len) = match primitive {
+                    Primitive::Rect(run) | Primitive::Shape(ShapeKind::RoundedRun { run, .. }) => {
+                        (run.x, run.y, run.len)
+                    }
+                    Primitive::Shape(ShapeKind::Dot { x, y }) => (x, y, 1),
+                };
+                for mx in x..x + len {
+                    cells[y as usize * width + mx as usize].push(polygons.len());
+                }
+                polygons.push(polygon(primitive));
+            }
+            for scale in 1..=12_u32 {
+                let s = f64::from(scale);
+                let mut checked = 0;
+                for my in 0..width {
+                    for mx in 0..width {
+                        let glyph = matrix
+                            .is_dark(mx, my)
+                            .then(|| Glyph::for_module(matrix, shape, mx, my));
+                        for sy in 0..scale {
+                            for sx in 0..scale {
+                                let raster = glyph.is_some_and(|g| g.covers(scale, sx, sy));
+                                let module = |v: usize| f64::from(u32::try_from(v).unwrap());
+                                let centre = Point::new(
+                                    module(mx) + (f64::from(sx) + 0.5) / s,
+                                    module(my) + (f64::from(sy) + 0.5) / s,
+                                );
+                                let vector = cells[my * width + mx]
+                                    .iter()
+                                    .any(|&i| inside(&polygons[i], centre));
+                                if raster == vector {
+                                    checked += 1;
+                                    continue;
+                                }
+                                // Only a curved edge may disagree, and only
+                                // where the centre is all but on it.
+                                let (du, dv) = (
+                                    (f64::from(sx) + 0.5) / s - 0.5,
+                                    (f64::from(sy) + 0.5) / s - 0.5,
+                                );
+                                let r = (du * du + dv * dv).sqrt();
+                                let edge = match glyph {
+                                    Some(Glyph::Dot) => DOT_DIAMETER / 2.0,
+                                    _ => CORNER_RADIUS,
+                                };
+                                assert!(
+                                    (r - edge).abs() < 1e-3,
+                                    "{shape} at {scale} px: module ({mx}, {my}) pixel \
+                                     ({sx}, {sy}) is {raster} in the raster, {vector} in \
+                                     the outline"
+                                );
+                            }
+                        }
+                    }
+                }
+                assert!(checked > 0);
+            }
+        }
+    }
+
     #[test]
     fn numbers_are_short() {
         let cases = [

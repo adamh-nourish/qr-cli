@@ -19,7 +19,7 @@ mod webp;
 use std::fmt;
 use std::str::FromStr;
 
-pub(crate) use self::grey::{GreyImage, greyscale, luma};
+pub(crate) use self::grey::{GreyImage, GreyRows, luma};
 pub use self::jpeg::render_jpeg;
 pub use self::png::render_png;
 pub use self::webp::render_webp;

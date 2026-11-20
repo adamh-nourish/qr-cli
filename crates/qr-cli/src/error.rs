@@ -10,6 +10,7 @@ use crate::cli::OutputFormat;
 use crate::exit::ExitStatus;
 use crate::input::InputSource;
 use crate::output::{WriteError, known_extensions};
+pub use crate::verify::Remedy;
 
 /// Errors the CLI reports to the user before exiting with a non-zero status.
 ///
@@ -87,6 +88,8 @@ pub enum CliError {
         /// Whether the check ran automatically, for a styled image, rather
         /// than because of `--verify`.
         automatic: bool,
+        /// What is most likely to make the code read back.
+        remedy: Remedy,
     },
 
     /// `--no-clobber` and the output file exists.
@@ -227,15 +230,15 @@ impl CliError {
             Self::WriteFile { error, .. } if error.kind() == io::ErrorKind::PermissionDenied => {
                 Some("check that you can write to the directory (use -o - for stdout)".to_owned())
             }
-            Self::Verify { error, automatic } if error.is_failure() => Some(
-                if *automatic {
-                    "styled codes are checked automatically: try --ec H, a larger --scale, \
-                     --shape square or stronger colours, or pass --no-verify to write it anyway"
-                } else {
-                    "try --ec H, a larger --scale, --shape square or stronger colours"
-                }
-                .to_owned(),
-            ),
+            Self::Verify {
+                error,
+                automatic,
+                remedy,
+            } if error.is_failure() => Some(if *automatic {
+                format!("{} (or --no-verify to write it anyway)", remedy.hint())
+            } else {
+                remedy.hint().to_owned()
+            }),
             Self::Verify {
                 error: VerifyError::Render(_),
                 ..
@@ -361,7 +364,11 @@ mod tests {
 
     #[test]
     fn verify_errors_have_statuses_codes_and_hints() {
-        let verify = |error, automatic| CliError::Verify { error, automatic };
+        let verify = |error, automatic| CliError::Verify {
+            error,
+            automatic,
+            remedy: Remedy::Other { square: false },
+        };
         let not_found = || VerifyError::NotFound { format: "png" };
         let explicit = verify(not_found(), false);
         assert_eq!(explicit.exit_status(), ExitStatus::VerificationFailed);
