@@ -147,9 +147,11 @@ fn read_bounded<R: Read>(reader: R, source: &InputSource) -> Result<Vec<u8>, Cli
 /// Opens `path` for reading if it is a regular file, and returns it with
 /// its length.
 ///
-/// The type is checked before opening, because opening a FIFO blocks and
-/// a device can be endless: images (`--logo`, `qr decode`) are only read
-/// from regular files, and the length lets the bounded loader refuse an
+/// Images (`--logo`, `qr decode`) are only read from regular files: a FIFO
+/// can block and a device can be endless. The path is opened without
+/// blocking (`O_NONBLOCK` on Unix) and the type is checked on the open
+/// handle, so there is no gap between the check and the open in which the
+/// path could be swapped. The length lets the bounded loader refuse an
 /// oversized file before reading it.
 ///
 /// # Errors
@@ -158,14 +160,38 @@ fn read_bounded<R: Read>(reader: R, source: &InputSource) -> Result<Vec<u8>, Cli
 /// directory; an error reading "not a regular file" for anything else that
 /// is not a file.
 pub(crate) fn open_regular_file(path: &Path) -> io::Result<(File, u64)> {
-    let metadata = fs::metadata(path)?;
+    let file = open_for_check(path)?;
+    // Checked on the open handle, so a path swapped for a FIFO or device
+    // after a check by name is still refused.
+    let metadata = file.metadata()?;
     if metadata.is_dir() {
         return Err(io::Error::from(io::ErrorKind::IsADirectory));
     }
     if !metadata.is_file() {
         return Err(io::Error::other("not a regular file"));
     }
-    Ok((File::open(path)?, metadata.len()))
+    Ok((file, metadata.len()))
+}
+
+/// Opens `path` for reading without blocking on a FIFO that has no writer
+/// (`O_NONBLOCK`, which does not affect reading a regular file).
+#[cfg(unix)]
+fn open_for_check(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Opens `path` for reading. Windows cannot open a directory as a file, so
+/// one is reported as a directory first.
+#[cfg(not(unix))]
+fn open_for_check(path: &Path) -> io::Result<File> {
+    if fs::metadata(path)?.is_dir() {
+        return Err(io::Error::from(io::ErrorKind::IsADirectory));
+    }
+    File::open(path)
 }
 
 /// Removes one trailing `\n` or `\r\n`.

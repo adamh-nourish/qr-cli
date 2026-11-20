@@ -120,19 +120,34 @@ fn data_is_escaped_unless_raw() {
     );
 }
 
-#[test]
-fn file_names_are_escaped_in_prefixes_and_messages() {
+/// Checks that `qr decode` escapes `bad` (and shows it as `shown`) in
+/// the path prefix of a decoded line and in the message for a missing
+/// file.
+fn escapes_names_with(bad: &str, shown: &str) {
     let dir = tempfile::tempdir().unwrap();
-    let a = code_file(dir.path(), "a\x1b[2Jb.png", b"x");
-    let missing = dir.path().join("gone\x1b[31m.png");
+    let a = code_file(dir.path(), &format!("a{bad}b.png"), b"x");
+    let missing = dir.path().join(format!("gone{bad}.png"));
     let out = piped(&[s(&a), s(&missing)]);
-    assert!(!out.text().contains('\x1b') && !out.err.contains('\x1b'));
+    assert!(!out.text().contains(bad) && !out.err.contains(bad));
     assert!(
-        out.text().contains("a\\u{1b}[2Jb.png: x\n"),
+        out.text().contains(&format!("a{shown}b.png: x\n")),
         "{}",
         out.text()
     );
-    assert!(out.err.contains("gone\\u{1b}[31m.png"), "{}", out.err);
+    assert!(out.err.contains(&format!("gone{shown}.png")), "{}", out.err);
+}
+
+#[test]
+fn file_names_are_escaped_in_prefixes_and_messages() {
+    // A bidi override is a legal file name everywhere, Windows included.
+    escapes_names_with("\u{202e}", "\\u{202e}");
+}
+
+#[test]
+#[cfg(unix)]
+fn control_characters_in_file_names_are_escaped() {
+    // Windows refuses control characters in file names.
+    escapes_names_with("\x1b[2J", "\\u{1b}[2J");
 }
 
 #[test]
@@ -219,7 +234,8 @@ fn per_image_failures_do_not_stop_the_rest() {
     let expected = format!(
         "error: cannot decode '{}': not a png, jpeg or webp image (the header matches none of them)\n  \
          hint: qr decode reads png, jpeg and webp images\n\
-         error: cannot read '{}': it is a directory\n\
+         error: cannot read '{}': it is a directory\n  \
+         hint: name an image file, not a directory\n\
          error: 2 of 4 images failed (2 unreadable); 2 codes decoded\n",
         text.display(),
         dir.path().display()

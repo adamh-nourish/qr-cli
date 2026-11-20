@@ -28,7 +28,11 @@
 //! bitmap is held, plus `rqrr`'s own copy of the image it reads (one byte
 //! per pixel, and a clone per candidate symbol).
 
+use thiserror::Error;
+
 use crate::color::Color;
+use crate::finders;
+pub use crate::finders::MAX_FINDER_CANDIDATES;
 use crate::loader::Bitmap;
 use crate::options::{EcLevel, Mask, Version};
 use crate::render::raster::luma;
@@ -84,6 +88,21 @@ impl std::fmt::Debug for DecodedCode {
     }
 }
 
+/// Why an image could not be searched for codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum DecodeError {
+    /// The image holds more finder-like patterns than are searched
+    /// ([`MAX_FINDER_CANDIDATES`]). Grouping them would take time that
+    /// grows faster than the square of their number, so the image is
+    /// refused instead (DECISIONS section 4.3).
+    #[error("the image holds more than {limit} finder-like patterns, too many to search")]
+    TooManyFinders {
+        /// The most finder-pattern candidates searched.
+        limit: usize,
+    },
+}
+
 /// Everything found in one image.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Scan {
@@ -110,6 +129,13 @@ impl Scan {
 /// place. Finding nothing is not an error: the [`Scan`] is then empty, and
 /// [`Scan::undecodable`] says whether something code-like was seen.
 ///
+/// # Errors
+///
+/// [`DecodeError::TooManyFinders`] if the image (or, when nothing decodes,
+/// its inverse) holds more than [`MAX_FINDER_CANDIDATES`] finder-like
+/// patterns. The patterns are counted in one pass over the pixels before
+/// `rqrr` groups them, so a hostile image is refused quickly.
+///
 /// ```
 /// use qr_core::decode::decode_bitmap;
 /// use qr_core::loader::decode_image;
@@ -117,21 +143,21 @@ impl Scan {
 ///
 /// let code = encode(b"hello", &EncodeOptions::default())?;
 /// let png = render_png(code.matrix(), &RenderOptions::default())?;
-/// let scan = decode_bitmap(decode_image(&png)?);
+/// let scan = decode_bitmap(decode_image(&png)?)?;
 /// assert_eq!(scan.codes.len(), 1);
 /// assert_eq!(scan.codes[0].payload, b"hello");
 /// assert_eq!(scan.codes[0].ec_level, EcLevel::M);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub fn decode_bitmap(image: Bitmap) -> Scan {
+pub fn decode_bitmap(image: Bitmap) -> Result<Scan, DecodeError> {
     let grey = Grey::from_bitmap(image);
     let factor = read_factor(grey.width, grey.height);
-    let normal = scan(&grey, factor, false);
+    let normal = scan(&grey, factor, false)?;
     if !normal.is_empty() {
-        return normal;
+        return Ok(normal);
     }
-    let inverted = scan(&grey, factor, true);
-    if inverted.is_empty() {
+    let inverted = scan(&grey, factor, true)?;
+    Ok(if inverted.is_empty() {
         // Report what the normal pass saw if the inverse saw nothing.
         Scan {
             undecodable: normal.undecodable.max(inverted.undecodable),
@@ -139,7 +165,7 @@ pub fn decode_bitmap(image: Bitmap) -> Scan {
         }
     } else {
         inverted
-    }
+    })
 }
 
 /// An image as one luma byte per pixel, row-major.
@@ -185,8 +211,8 @@ fn read_factor(width: usize, height: usize) -> usize {
 }
 
 /// Reads `grey` enlarged `factor` times (inverted if asked) and decodes
-/// every symbol `rqrr` finds.
-fn scan(grey: &Grey, factor: usize, invert: bool) -> Scan {
+/// every symbol `rqrr` finds, unless it holds too many finder patterns.
+fn scan(grey: &Grey, factor: usize, invert: bool) -> Result<Scan, DecodeError> {
     let Grey {
         width,
         height,
@@ -200,6 +226,14 @@ fn scan(grey: &Grey, factor: usize, invert: bool) -> Scan {
                 .unwrap_or(u8::MAX);
             if invert { !luma } else { luma }
         });
+    // Pixels of a freshly prepared image are 0 (light) or 1 (dark).
+    if finders::too_many(prepared.width(), prepared.height(), |x, y| {
+        prepared.get_pixel_at(x, y) == 1
+    }) {
+        return Err(DecodeError::TooManyFinders {
+            limit: MAX_FINDER_CANDIDATES,
+        });
+    }
     let mut codes = Vec::new();
     let mut undecodable = 0;
     for grid in prepared.detect_grids() {
@@ -214,11 +248,11 @@ fn scan(grey: &Grey, factor: usize, invert: bool) -> Scan {
         }
     }
     codes.sort_by_key(|code| (code.bounds[0].y, code.bounds[0].x));
-    Scan {
+    Ok(Scan {
         codes,
         undecodable,
         enlarged: u8::try_from(factor).unwrap_or(u8::MAX),
-    }
+    })
 }
 
 /// A decoded symbol with `rqrr`'s metadata mapped to this crate's types

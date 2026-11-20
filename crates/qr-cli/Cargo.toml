@@ -26,6 +26,10 @@ tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# O_NONBLOCK, so opening an image or logo path never blocks on a FIFO.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true

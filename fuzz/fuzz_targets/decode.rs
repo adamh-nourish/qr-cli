@@ -1,6 +1,8 @@
 //! `qr decode` with arbitrary bytes: the bounded loader, then every code
 //! `qr_core::decode` finds. Neither may panic (a panic aborts a release
-//! build), and anything decoded must be self-consistent. Small inputs are
+//! build), and anything decoded must be self-consistent. An image refused
+//! for holding too many finder-like patterns is fine; a slow one is
+//! reported by `-timeout` (fuzz.yml). Small inputs are
 //! also read as raw greyscale bitmaps, which reaches `rqrr`'s detector with
 //! degenerate shapes (thin modules, tiny or lopsided images) far more often
 //! than valid image files do.
@@ -21,7 +23,9 @@ fn check(codes: &[DecodedCode]) {
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(image) = decode_image(data) {
-        check(&decode_bitmap(image).codes);
+        if let Ok(scan) = decode_bitmap(image) {
+            check(&scan.codes);
+        }
     }
     // The first byte picks a width; the rest are luma pixels.
     if let Some((&width, pixels)) = data.split_first() {
@@ -38,7 +42,9 @@ fuzz_target!(|data: &[u8]| {
             return;
         };
         if let Some(bitmap) = Bitmap::from_rgba(w, h, rgba) {
-            check(&decode_bitmap(bitmap).codes);
+            if let Ok(scan) = decode_bitmap(bitmap) {
+                check(&scan.codes);
+            }
         }
     }
 });

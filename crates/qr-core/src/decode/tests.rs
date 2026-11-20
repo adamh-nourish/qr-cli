@@ -1,4 +1,5 @@
 use super::*;
+use crate::finders::finder_grid;
 use crate::loader::decode_image;
 use crate::render::{ModuleShape, RenderOptions, render_jpeg, render_png, render_webp};
 use crate::{EncodeOptions, encode};
@@ -6,6 +7,11 @@ use crate::{EncodeOptions, encode};
 fn png(data: &[u8], options: EncodeOptions, render: &RenderOptions) -> Vec<u8> {
     let code = encode(data, &options).unwrap();
     render_png(code.matrix(), render).unwrap()
+}
+
+/// Decodes `image`, which must not be refused.
+fn read(image: Bitmap) -> Scan {
+    decode_bitmap(image).unwrap()
 }
 
 fn bitmap(bytes: &[u8]) -> Bitmap {
@@ -51,7 +57,7 @@ fn reports_payload_version_level_and_mask() {
                 .with_mask(Mask::new(mask));
             let code = encode(b"https://example.com/decode", &options).unwrap();
             let bytes = render_png(code.matrix(), &RenderOptions::default()).unwrap();
-            let scan = decode_bitmap(bitmap(&bytes));
+            let scan = read(bitmap(&bytes));
             assert_eq!(scan.codes.len(), 1, "{level} {mask}");
             let found = &scan.codes[0];
             assert_eq!(found.payload, b"https://example.com/decode");
@@ -69,7 +75,7 @@ fn bounds_are_in_source_pixels() {
     // Version 1 at 10 px per module with a 4-module quiet zone: the symbol
     // spans pixels 40 to 250.
     let bytes = png(b"hi", EncodeOptions::default(), &RenderOptions::default());
-    let scan = decode_bitmap(bitmap(&bytes));
+    let scan = read(bitmap(&bytes));
     let [tl, tr, br, bl] = scan.codes[0].bounds;
     let near = |p: Point, x: i32, y: i32| (p.x - x).abs() <= 3 && (p.y - y).abs() <= 3;
     assert!(near(tl, 40, 40), "{tl:?}");
@@ -88,7 +94,7 @@ fn every_raster_format_and_shape_reads() {
             render_jpeg(code.matrix(), &options).unwrap(),
             render_webp(code.matrix(), &options).unwrap(),
         ] {
-            let scan = decode_bitmap(bitmap(&bytes));
+            let scan = read(bitmap(&bytes));
             assert_eq!(scan.codes.len(), 1, "{shape:?}");
             assert_eq!(scan.codes[0].payload, b"formats");
         }
@@ -113,7 +119,7 @@ fn finds_every_code_in_an_image_in_reading_order() {
         &RenderOptions::default(),
     ));
     let image = canvas(700, 700, &[(&b, 380, 10), (&c, 10, 400), (&a, 10, 10)]);
-    let scan = decode_bitmap(image);
+    let scan = read(image);
     let payloads: Vec<&[u8]> = scan.codes.iter().map(|c| c.payload.as_slice()).collect();
     assert_eq!(payloads, [&b"first"[..], b"second", b"third"]);
 }
@@ -123,7 +129,7 @@ fn light_on_dark_codes_are_read_inverted() {
     let render = RenderOptions::default()
         .with_fg(Color::WHITE)
         .with_bg(Color::BLACK);
-    let scan = decode_bitmap(bitmap(&png(b"inverse", EncodeOptions::default(), &render)));
+    let scan = read(bitmap(&png(b"inverse", EncodeOptions::default(), &render)));
     assert_eq!(scan.codes.len(), 1);
     assert_eq!(scan.codes[0].payload, b"inverse");
     assert!(scan.codes[0].inverted);
@@ -132,7 +138,7 @@ fn light_on_dark_codes_are_read_inverted() {
 #[test]
 fn transparency_is_read_on_white() {
     let render = RenderOptions::default().with_transparent(true);
-    let scan = decode_bitmap(bitmap(&png(b"clear", EncodeOptions::default(), &render)));
+    let scan = read(bitmap(&png(b"clear", EncodeOptions::default(), &render)));
     assert_eq!(scan.codes[0].payload, b"clear");
 }
 
@@ -142,7 +148,7 @@ fn one_pixel_modules_are_enlarged_and_do_not_panic() {
     for margin in [0, 1, 4] {
         let render = RenderOptions::default().with_scale(1).with_margin(margin);
         let bytes = png(b"tiny modules", EncodeOptions::default(), &render);
-        let scan = decode_bitmap(bitmap(&bytes));
+        let scan = read(bitmap(&bytes));
         assert_eq!(scan.enlarged, 3);
         // A code without a quiet zone may not be found; it must not panic.
         if margin == 4 {
@@ -162,18 +168,18 @@ fn rotated_codes_read() {
         EncodeOptions::default(),
         &RenderOptions::default(),
     ));
-    let scan = decode_bitmap(rotated(&image));
+    let scan = read(rotated(&image));
     assert_eq!(scan.codes[0].payload, b"turned");
 }
 
 #[test]
 fn blank_and_noisy_images_hold_no_code() {
     let blank = Bitmap::from_rgba(50, 40, vec![255; 50 * 40 * 4]).unwrap();
-    let scan = decode_bitmap(blank);
+    let scan = read(blank);
     assert!(scan.is_empty());
     assert_eq!(scan.undecodable, 0);
     let dark = Bitmap::from_rgba(3, 3, vec![0; 36]).unwrap();
-    assert!(decode_bitmap(dark).is_empty());
+    assert!(read(dark).is_empty());
     // A deterministic pseudo-random pattern.
     let mut state = 0x2545_f491_u32;
     let noise: Vec<u8> = (0..64 * 64)
@@ -185,7 +191,7 @@ fn blank_and_noisy_images_hold_no_code() {
             [v, v, v, 255]
         })
         .collect();
-    assert!(decode_bitmap(Bitmap::from_rgba(64, 64, noise).unwrap()).is_empty());
+    assert!(read(Bitmap::from_rgba(64, 64, noise).unwrap()).is_empty());
 }
 
 #[test]
@@ -205,7 +211,7 @@ fn a_damaged_code_is_counted_as_undecodable() {
             pixels[at..at + 3].fill(0);
         }
     }
-    let scan = decode_bitmap(Bitmap::from_rgba(w, h, pixels).unwrap());
+    let scan = read(Bitmap::from_rgba(w, h, pixels).unwrap());
     assert!(scan.is_empty());
     assert_eq!(scan.undecodable, 1);
 }
@@ -270,7 +276,7 @@ fn debug_output_hides_the_payload() {
         EncodeOptions::default(),
         &RenderOptions::default(),
     );
-    let scan = decode_bitmap(bitmap(&bytes));
+    let scan = read(bitmap(&bytes));
     let text = format!("{:?}", scan.codes[0]);
     assert!(
         text.contains("bytes: 6") && !text.contains("secret"),
@@ -287,7 +293,7 @@ fn the_guard_is_needed_one_pixel_modules_panic_rqrr_unenlarged() {
     let grey = Grey::from_bitmap(bitmap(&bytes));
     let unguarded = std::panic::catch_unwind(|| scan(&grey, 1, false));
     assert!(unguarded.is_err(), "rqrr no longer panics on 1-px modules");
-    assert_eq!(scan(&grey, 3, false).codes.len(), 1);
+    assert_eq!(scan(&grey, 3, false).unwrap().codes.len(), 1);
 }
 
 #[test]
@@ -298,7 +304,7 @@ fn twice_the_size_is_enough_for_one_pixel_modules() {
     for data in [&b"tiny"[..], &[b'x'; 300][..]] {
         let tiny = bitmap(&png(data, EncodeOptions::default(), &render));
         let image = canvas(1_400, 1_400, &[(&tiny, 700, 700)]);
-        let scan = decode_bitmap(image);
+        let scan = read(image);
         assert_eq!(scan.enlarged, 2);
         assert_eq!(scan.codes.len(), 1);
         assert_eq!(scan.codes[0].payload, data);
@@ -332,9 +338,73 @@ fn damaged_thin_module_codes_never_panic() {
             let flipped = !pixels[at];
             pixels[at..at + 3].fill(flipped);
         }
-        let scan = decode_bitmap(Bitmap::from_rgba(w, h, pixels).unwrap());
+        let scan = read(Bitmap::from_rgba(w, h, pixels).unwrap());
         for code in &scan.codes {
             assert_eq!(code.payload, data);
         }
     }
+}
+
+#[test]
+fn a_dense_grid_of_finder_patterns_is_refused_quickly() {
+    // 40 x 40 finder patterns: about 194 s of CPU in rqrr 0.9.3 before the
+    // bound. Refused after one pass over the pixels; the generous limit
+    // allows for unoptimised, instrumented test builds.
+    let image = finder_grid(40, 3, 4, 1_365);
+    let started = std::time::Instant::now();
+    let err = decode_bitmap(image).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeError::TooManyFinders {
+            limit: MAX_FINDER_CANDIDATES
+        }
+    );
+    assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+    assert_eq!(
+        err.to_string(),
+        "the image holds more than 64 finder-like patterns, too many to search"
+    );
+}
+
+#[test]
+fn the_inverse_is_bounded_too() {
+    // Light patterns on dark: the normal pass finds nothing to group and
+    // the inverted pass refuses the image.
+    let image = finder_grid(12, 3, 2, 400);
+    let (w, h) = (image.width(), image.height());
+    let mut pixels = image.into_pixels();
+    for px in pixels.chunks_mut(4) {
+        px[..3].iter_mut().for_each(|c| *c = !*c);
+    }
+    let err = decode_bitmap(Bitmap::from_rgba(w, h, pixels).unwrap()).unwrap_err();
+    assert!(matches!(err, DecodeError::TooManyFinders { .. }));
+}
+
+#[test]
+fn a_sheet_of_codes_is_within_the_bound() {
+    // Twelve codes, 36 finder patterns, are searched rather than refused.
+    // (rqrr 0.9 pairs some finder patterns across neighbouring codes, so
+    // not every code in so regular a sheet is read.)
+    let parts: Vec<Bitmap> = (0..12)
+        .map(|i| {
+            let render = RenderOptions::default().with_scale(4);
+            bitmap(&png(
+                format!("code {i}").as_bytes(),
+                EncodeOptions::default(),
+                &render,
+            ))
+        })
+        .collect();
+    let placed: Vec<(&Bitmap, u32, u32)> = (0u32..)
+        .zip(&parts)
+        .map(|(i, part)| {
+            (
+                part,
+                (i % 4) * 160 + (i / 4) * 25,
+                (i / 4) * 160 + (i % 4) * 15,
+            )
+        })
+        .collect();
+    let scan = read(canvas(760, 600, &placed));
+    assert!(!scan.is_empty());
 }

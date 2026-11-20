@@ -560,6 +560,7 @@ dependencies = [
  "clap_mangen",
  "image",
  "insta",
+ "libc",
  "predicates",
  "qr-core",
  "roxmltree",

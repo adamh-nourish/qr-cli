@@ -279,8 +279,9 @@ Examples:
   qr decode code.png           Print the data in code.png
   qr decode a.png b.jpg --json Print a JSON object for both images
   qr decode - < code.webp      Read the image from stdin
-  qr decode code.png --raw > data.bin
-                               Write the exact bytes (not to a terminal)
+  qr decode code.png --raw > data.txt
+                               Write the data unescaped, one code per line
+                               (not to a terminal)
 
 Exit codes:
   0 every image held a code, 4 an image could not be read,
@@ -302,9 +303,9 @@ pub struct DecodeArgs {
     #[arg(long, conflicts_with = "raw")]
     pub json: bool,
 
-    /// Print each code's data exactly, without escaping, followed by a
-    /// newline. Refused when stdout is a terminal, where the data could
-    /// send escape sequences.
+    /// Print each code's data unescaped, followed by a newline, with no
+    /// path prefix even for several images. Refused when stdout is a
+    /// terminal, where the data could send escape sequences.
     #[arg(long)]
     pub raw: bool,
 }
@@ -322,7 +323,7 @@ pub struct GlobalArgs {
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
 
-    /// Also print what was encoded and how.
+    /// Also print details on stderr (what was encoded, or decoded, and how).
     #[arg(short, long, global = true)]
     pub verbose: bool,
 }

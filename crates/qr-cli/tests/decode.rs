@@ -169,7 +169,7 @@ fn formats_that_are_not_images_are_refused() {
                 "not a png, jpeg or webp image (the header matches none of them)",
             ))
             .stderr(predicate::str::contains(
-                "hint: qr decode reads png, jpeg and webp images",
+                "hint: qr decode reads png, jpeg and webp",
             ));
     }
 }
@@ -351,6 +351,120 @@ fn devices_and_fifos_are_not_read() {
         .assert()
         .code(4)
         .stderr(predicate::str::contains(
-            "cannot read '/dev/zero': not a regular file",
+            "cannot read '/dev/zero': not a regular file\n  hint: check the image path\n",
         ));
+    // A FIFO with no writer is refused at once rather than blocking.
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe.png");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    qr().arg("decode")
+        .arg(&fifo)
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("not a regular file"));
+}
+
+#[test]
+fn every_unreadable_path_has_a_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    qr().arg("decode")
+        .arg(dir.path())
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains(
+            "it is a directory\n  hint: name an image file, not a directory\n",
+        ));
+    let svg = generate(dir.path(), "code.svg", &["hello"]);
+    qr().arg("decode")
+        .arg(&svg)
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains(
+            "hint: qr decode reads png, jpeg and webp; render the code with -f png to decode it",
+        ));
+    let empty = dir.path().join("empty.png");
+    fs::write(&empty, b"").unwrap();
+    qr().arg("decode")
+        .arg(&empty)
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains(
+            "hint: check the file is a complete image",
+        ));
+}
+
+/// A light `side` x `side` image holding an `n` x `n` grid of finder
+/// patterns `module` pixels per module, `gap` modules apart.
+fn finder_grid(n: u32, module: u32, gap: u32, side: u32) -> GrayImage {
+    let period = (7 + gap) * module;
+    GrayImage::from_fn(side, side, |x, y| {
+        let (Some(x), Some(y)) = (x.checked_sub(4 * module), y.checked_sub(4 * module)) else {
+            return image::Luma([255]);
+        };
+        let (gx, gy) = (x / period, y / period);
+        let (mx, my) = ((x % period) / module, (y % period) / module);
+        let ring = mx.abs_diff(3).max(my.abs_diff(3));
+        let dark = gx < n && gy < n && mx < 7 && my < 7 && (ring == 3 || ring <= 1);
+        image::Luma([if dark { 0 } else { 255 }])
+    })
+}
+
+#[test]
+fn a_dense_grid_of_finder_patterns_is_refused_quickly() {
+    // The PR 11 security review's image: a few KB of PNG holding 40 x 40
+    // finder patterns kept rqrr busy for minutes.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("grid.png");
+    finder_grid(40, 3, 4, 1_365)
+        .save_with_format(&path, ImageFormat::Png)
+        .unwrap();
+    assert!(fs::metadata(&path).unwrap().len() < 64 * 1024);
+    qr().arg("decode")
+        .arg(&path)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .code(4)
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "holds more than 64 finder-like patterns, too many to search\n  \
+             hint: crop the image to the code you want to read\n",
+        ));
+    qr().args(["decode", "--json"])
+        .arg(&path)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .code(4)
+        .stdout(predicate::str::contains("\"code\":\"too_many_finders\""));
+}
+
+#[test]
+fn a_logo_tiled_with_finder_patterns_fails_verification_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    let logo = dir.path().join("logo.png");
+    finder_grid(12, 3, 1, 300)
+        .save_with_format(&logo, ImageFormat::Png)
+        .unwrap();
+    qr().args([
+        "--ec",
+        "H",
+        "--scale",
+        "30",
+        "--verify",
+        "--logo-scale",
+        "0.3",
+        "--logo",
+    ])
+    .arg(&logo)
+    .arg("-o")
+    .arg(dir.path().join("out.png"))
+    .arg("L".repeat(100))
+    .timeout(std::time::Duration::from_secs(60))
+    .assert()
+    .code(6)
+    .stderr(predicate::str::contains("too many to read back"));
 }

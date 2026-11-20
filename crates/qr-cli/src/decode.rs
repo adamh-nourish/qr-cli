@@ -2,17 +2,19 @@
 //!
 //! Each `IMAGE` is read through `qr_core`'s bounded loader (regular files
 //! only; `-` is stdin) and searched with [`qr_core::decode`]. An image
-//! that cannot be read, or holds no readable code, is reported on stderr
-//! and the remaining images are still read; the exit status then says
-//! what went wrong (DECISIONS section 2): 4 if any image could not be
-//! read, otherwise 5 if any held no code, otherwise 0.
+//! that cannot be read (including one refused for holding too many
+//! finder-like patterns, DECISIONS section 4.3), or holds no readable
+//! code, is reported on stderr and the remaining images are still read;
+//! the exit status then says what went wrong (DECISIONS section 2): 4 if
+//! any image could not be read, otherwise 5 if any held no code,
+//! otherwise 0.
 //!
 //! Decoded data is untrusted, so it reaches stdout in one of three ways
 //! (DECISIONS section 4.5):
 //! - by default, escaped with `sanitize_for_terminal`, with bytes that are
 //!   not UTF-8 written as `\x{..}`, one line per code;
-//! - with `--raw`, exactly as decoded, which is refused when stdout is a
-//!   terminal;
+//! - with `--raw`, unescaped, one code per line, which is refused when
+//!   stdout is a terminal;
 //! - with `--json`, in one JSON object whose strings escape every control
 //!   character, with base64 for data that is not UTF-8.
 
@@ -164,7 +166,10 @@ fn read(path: &Path, origin: &InputSource, stdin: &mut dyn Read) -> Result<Scan,
             error,
         },
     })?;
-    Ok(decode_bitmap(bitmap))
+    decode_bitmap(bitmap).map_err(|error| CliError::Search {
+        origin: origin.clone(),
+        error,
+    })
 }
 
 /// Reports `err` for one image and returns its JSON entry.
@@ -190,7 +195,7 @@ enum Mode {
         /// Whether to start each line with the image's path.
         prefix: bool,
     },
-    /// The exact bytes, one code per line.
+    /// The data unescaped, one code per line (each followed by `\n`).
     Raw,
     /// Nothing until the end, when the JSON report is written.
     Json,

@@ -29,6 +29,7 @@ mod contrast;
 pub mod decode;
 mod encode;
 mod error;
+mod finders;
 pub mod loader;
 pub mod logo;
 mod matrix;

@@ -145,7 +145,7 @@ Options:
           Print errors only, no warnings
 
   -v, --verbose
-          Also print what was encoded and how
+          Also print details on stderr (what was encoded, or decoded, and how)
 
   -h, --help
           Print help (see a summary with '-h')
