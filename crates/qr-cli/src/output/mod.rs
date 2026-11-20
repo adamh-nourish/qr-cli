@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 pub use self::data_uri::{base64, data_uri};
 pub use self::format::{Renderer, known_extensions};
 pub use self::write::{WriteError, precheck, write_atomic};
-use crate::cli::{GenerateArgs, OutputFormat};
+use crate::cli::{OutputFormat, RenderArgs};
 use crate::diag::Reporter;
 use crate::error::CliError;
 
@@ -84,7 +84,7 @@ impl Plan {
     /// with the code, or binary output to a terminal; an I/O error when the
     /// `-o` path is a directory or exists under `--no-clobber`.
     pub fn resolve(
-        args: &GenerateArgs,
+        args: &RenderArgs,
         stdout_is_tty: bool,
         reporter: &mut Reporter<'_>,
     ) -> Result<Self, CliError> {

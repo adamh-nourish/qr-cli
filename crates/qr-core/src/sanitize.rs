@@ -62,11 +62,17 @@ fn sanitize_with(text: &str, escape: impl Fn(char) -> bool) -> Cow<'_, str> {
 /// Whether a terminal would act on `c` rather than just display it.
 fn needs_escape(c: char) -> bool {
     // `char::is_control` is the Unicode `Cc` category: C0, DEL and C1.
-    c.is_control()
-        || matches!(
-            c,
-            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-        )
+    c.is_control() || is_bidi_format(c)
+}
+
+/// Whether `c` is one of the bidirectional formatting characters listed in
+/// [`sanitize_for_terminal`], which can make text display in a different
+/// order from the one it is stored in.
+pub(crate) const fn is_bidi_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 #[cfg(test)]

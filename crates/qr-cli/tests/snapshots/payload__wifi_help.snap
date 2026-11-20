@@ -1,0 +1,152 @@
+---
+source: crates/qr-cli/tests/payload.rs
+expression: wifi_help
+---
+Encode WiFi credentials that phones can join with one tap
+
+Usage: qr wifi [OPTIONS] --ssid <SSID>
+
+Options:
+      --ssid <SSID>
+          The network name
+
+      --password <PASSWORD>
+          The password. It is visible in shell history and the process list; prefer --password-stdin
+
+      --password-stdin
+          Read the password from stdin (one trailing newline is dropped)
+
+      --auth <AUTH>
+          How the network authenticates: wpa (WPA/WPA2/WPA3), wep or nopass (an open network)
+          
+          [default: wpa]
+
+      --hidden
+          The network does not broadcast its name
+
+      --print-payload
+          Print the payload text instead of a code (with a trailing newline, so `... --print-payload
+          | qr` encodes exactly the same data). A WiFi password is printed too, since the code holds
+          it
+
+      --color <WHEN>
+          When to use colour; NO_COLOR and CLICOLOR_FORCE are honoured in auto
+
+          Possible values:
+          - auto:   Colour when writing to a terminal, unless the environment says not to
+          - always: Always colour
+          - never:  Never colour
+          
+          [default: auto]
+
+  -q, --quiet
+          Print errors only, no warnings
+
+  -v, --verbose
+          Also print what was encoded and how
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Render options:
+  -o, --output <PATH|->
+          Write the code to PATH ('-' for stdout, not /dev/stdout). Existing files are replaced
+          atomically and keep their permissions; a symlink is replaced, not followed
+
+  -f, --format <FORMAT>
+          Output format [default: from the -o extension; else terminal when stdout is a terminal,
+          otherwise text]
+
+          Possible values:
+          - terminal: Unicode half blocks, forced black on white with ANSI colours
+          - text:     Unicode half blocks with no escape sequences
+          - ascii:    '##' and spaces, pure ASCII
+          - png:      PNG image (1-bit indexed, or RGBA when transparent)
+          - svg:      Scalable Vector Graphics
+          - jpeg:     JPEG image (quality 92; at least 4 pixels per module)
+          - webp:     Lossless WebP image
+          - pdf:      One-page vector PDF
+          - eps:      Encapsulated PostScript
+
+      --ec <LEVEL>
+          Error correction level: L, M, Q or H
+          
+          [default: M]
+
+      --qr-version <N>
+          Smallest symbol version to use, 1 to 40 (larger data still grows it)
+
+      --mode <MODE>
+          Data mode: auto, numeric, alnum or byte
+          
+          [default: auto]
+
+      --mask <N>
+          Force mask pattern 0 to 7 instead of picking one automatically
+
+      --margin <N>
+          Quiet zone around the code, in modules (below 4 may not scan)
+          
+          [default: 4]
+
+      --scale <N>
+          Size of one module in pixels (PNG, JPEG, WebP, SVG) or points (PDF, EPS) [default: 10]
+
+      --size <PX>
+          Width and height of a PNG, JPEG or WebP image in pixels, with the largest whole module
+          size that fits (vector formats are at most this size)
+
+      --dpi <N>
+          Pixel density to record in a PNG or JPEG file, in dots per inch
+
+      --fg <COLOR>
+          Colour of dark modules: #RGB, #RRGGBB, #RRGGBBAA or a CSS name [default: black]
+
+      --bg <COLOR>
+          Colour of light modules and the quiet zone [default: white]
+
+      --transparent
+          Leave the background unpainted (image formats only)
+
+      --invert
+          Swap dark and light modules (or --fg and --bg for images)
+
+      --shape <SHAPE>
+          How dark modules are drawn in png, jpeg, webp, svg, pdf and eps output; the three finder
+          patterns stay square
+
+          Possible values:
+          - square:  Full squares: the standard look
+          - rounded: Squares with their exposed corners rounded
+          - dots:    Circles
+          
+          [default: square]
+
+      --verify
+          Read the rendered code back with a decoder and fail (exit 6) unless it holds the input.
+          Automatic for images with a non-default --shape/--fg/--bg, --transparent or --invert. Text
+          output is checked as a plain module grid (the symbol, not the characters)
+
+      --no-verify
+          Skip the automatic read-back check
+
+      --data-uri
+          Print the image as a base64 data: URI instead of raw bytes [default format: svg]. With -o,
+          the file holds the URI: use a .txt name
+
+      --no-clobber
+          Fail instead of replacing an existing -o file
+
+      --json
+          Print a JSON result object on stdout and JSON errors on stderr
+
+Examples:
+  qr wifi --ssid Home --password-stdin < pw.txt -o wifi.png
+                                    Read the password from a file
+  printf '%s' "$PW" | qr wifi --ssid Home --password-stdin
+                                    Pipe it from a variable
+  qr wifi --ssid 'Cafe Guest' --auth nopass
+                                    An open network with no password
+  qr wifi --ssid Lab --auth wep --password-stdin --hidden < key.txt
+
+--print-payload shows the password on screen, as the code itself holds it.

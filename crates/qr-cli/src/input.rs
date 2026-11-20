@@ -31,6 +31,8 @@ pub enum InputSource {
     Stdin,
     /// A file given with `-i`.
     File(PathBuf),
+    /// A payload subcommand, such as `wifi`.
+    Payload(&'static str),
 }
 
 impl fmt::Display for InputSource {
@@ -39,6 +41,7 @@ impl fmt::Display for InputSource {
             Self::Argument => f.write_str("the TEXT argument"),
             Self::Stdin => f.write_str("stdin"),
             Self::File(path) => write!(f, "'{}'", path.display()),
+            Self::Payload(kind) => write!(f, "the {kind} payload"),
         }
     }
 }
@@ -291,5 +294,6 @@ mod tests {
         assert_eq!(InputSource::Argument.to_string(), "the TEXT argument");
         assert_eq!(InputSource::Stdin.to_string(), "stdin");
         assert_eq!(InputSource::File("a b.txt".into()).to_string(), "'a b.txt'");
+        assert_eq!(InputSource::Payload("wifi").to_string(), "the wifi payload");
     }
 }

@@ -1,0 +1,51 @@
+# cargo-fuzz targets (DECISIONS section 7: nightly, non-blocking).
+#
+# This crate is its own workspace, excluded from the main one, so its
+# libFuzzer build dependencies (a C++ toolchain through `cc`) never reach
+# the shipped binary or the main `cargo deny` graph. Run a target with
+# nightly Rust and cargo-fuzz:
+#
+#   cargo +nightly fuzz run payload -- -max_total_time=60
+
+[package]
+name = "qr-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+qr-core = { path = "../crates/qr-core" }
+rqrr = { version = "0.9", default-features = false }
+roxmltree = "0.20"
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "payload"
+path = "fuzz_targets/payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "svg"
+path = "fuzz_targets/svg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
+bench = false

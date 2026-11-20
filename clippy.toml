@@ -3,3 +3,5 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-print-in-tests = true
+# Format and product names in payload docs; ".." keeps clippy's defaults.
+doc-valid-idents = ["WiFi", "MeCard", "DoCoMo", "ZXing", "vCard", "iCalendar", ".."]
