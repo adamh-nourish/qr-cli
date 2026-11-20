@@ -2,7 +2,7 @@
 //! the narrowest mode that represents them.
 //!
 //! The algorithm is the one the `qrcode` crate uses (`optimize::Parser` and
-//! `optimize::Optimizer`), so automatic sizing matches `qrcode` exactly:
+//! `optimize::Optimizer`):
 //!
 //! 1. Split the data into maximal runs of one character class: digits,
 //!    other alphanumeric characters, and everything else.
@@ -14,6 +14,11 @@
 //! The merge decision depends on the width of the character count field,
 //! which changes at versions 10 and 27, so segmentation is computed per
 //! version class.
+//!
+//! The merge is greedy: it only compares each run with its left
+//! neighbour, so it is not always optimal and can even need more bits than
+//! one segment in the narrowest mode. [`crate::plan`] therefore also tries
+//! that single segment at each version (see `plan_auto`).
 //!
 //! One deliberate difference from `qrcode`: Kanji mode is never used.
 //! `qrcode` packs any byte pair that looks like Shift JIS into Kanji mode,

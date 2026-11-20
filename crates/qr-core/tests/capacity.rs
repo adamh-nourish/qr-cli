@@ -131,3 +131,47 @@ fn capacity_error_reads_well() {
         "data too long: 3214 bytes exceeds the maximum of 2953 for byte mode at error correction level L (version 40)"
     );
 }
+
+/// Automatic mode never needs a larger version than the narrowest fixed
+/// mode, and fails only when that mode fails too. Run-structured input
+/// (letters, digits and alphanumeric symbols in runs) is where greedy
+/// segmentation can lose to a single segment; review of PR 8b (GitHub #9)
+/// found `XSL790106502KNC+` at Q (greedy v2, one segment v1).
+mod auto_vs_narrowest_fixed {
+    use proptest::prelude::*;
+    use qr_core::{EcLevel, EncodeOptions, Mode, ModeChoice, plan};
+
+    fn check(data: &[u8], ec: EcLevel) -> Result<(), TestCaseError> {
+        let auto = EncodeOptions::default().with_ec_level(ec);
+        let fixed = auto.with_mode(ModeChoice::Fixed(Mode::narrowest_for(data)));
+        match (plan(data, &auto), plan(data, &fixed)) {
+            (Ok(a), Ok(f)) => prop_assert!(a.version <= f.version, "{a:?} vs {f:?}"),
+            (Ok(_) | Err(_), Err(_)) => {}
+            (Err(a), Ok(f)) => prop_assert!(false, "auto failed ({a}) but fixed fits {f:?}"),
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn short_runs(
+            data in "([A-Z]{1,4}|[0-9]{1,12}|[ $%*+./:-]{1,2}){0,12}",
+            ec in prop::sample::select(EcLevel::ALL.to_vec()),
+        ) {
+            check(data.as_bytes(), ec)?;
+        }
+
+        /// The same kind of pattern repeated up to the v40 ceiling.
+        #[test]
+        fn repeated_to_capacity(
+            unit in "([A-Z]{1,4}|[0-9]{1,12}|[ $%*+./:-]{1,2}){1,8}",
+            len in 3_000usize..7_100,
+            ec in prop::sample::select(EcLevel::ALL.to_vec()),
+        ) {
+            let data: Vec<u8> = unit.bytes().cycle().take(len).collect();
+            check(&data, ec)?;
+        }
+    }
+}

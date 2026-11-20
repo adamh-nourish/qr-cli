@@ -3,9 +3,15 @@
 //! The production backend drives `qrcode`'s low-level API with segments and
 //! a version chosen by `qr_core::plan`, and recovers the mask from the
 //! format information. These tests check that this path is
-//! indistinguishable from calling `qrcode` directly: the same version, the
-//! same automatic mask and bit-identical matrices, and `DataTooLong`
-//! exactly when `qrcode` reports it.
+//! indistinguishable from calling `qrcode` directly whenever both pick the
+//! same version (the same automatic mask and bit-identical matrices), that
+//! `qr_core` never picks a larger version, and that it reports `DataTooLong`
+//! only when `qrcode` does. `qr_core` can be smaller because `plan` also
+//! tries one segment in the narrowest mode, which `qrcode`'s greedy
+//! segmentation sometimes beats by a version.
+//!
+//! These tests check the plumbing against `qrcode`, not the standard: the
+//! independent checks are the `rqrr` round trips and `tests/mask_penalty.rs`.
 //!
 //! `qrcode` treats byte pairs that look like Shift JIS as Kanji, which
 //! `qr_core` deliberately never does (UTF-8 text would not round-trip), so
@@ -19,7 +25,7 @@
 use proptest::prelude::*;
 use qr_core::{
     CapacityUnit, EcLevel, EncodeError, EncodeOptions, Mask, Mode, ModeChoice, QrCode, QrEncoder,
-    QrcodeEncoder, Version, VersionChoice, encode,
+    QrcodeEncoder, Segment, Version, VersionChoice, encode,
 };
 
 fn reference_ec(ec: EcLevel) -> qrcode::EcLevel {
@@ -65,12 +71,29 @@ fn assert_same_symbol(ours: &QrCode, reference: &qrcode::QrCode) {
     );
 }
 
-/// Our automatic encode against `qrcode`'s: same symbol, or both too long.
+/// Our automatic encode against `qrcode`'s: never a larger version, the
+/// same symbol whenever the version is the same, and too long only when
+/// `qrcode` is too.
+///
+/// `qr_core` can pick a smaller version than `qrcode`, whose greedy
+/// segmentation sometimes needs more bits than one segment in the
+/// narrowest mode (`plan` also tries that segment). Review of PR 8b
+/// (GitHub #9) found `XSL790106502KNC+` at Q: v1 here, v2 in `qrcode`.
 fn assert_matches_qrcode(data: &[u8], ec: EcLevel) {
     let ours = encode(data, &EncodeOptions::default().with_ec_level(ec));
     match (ours, reference_auto(data, ec)) {
-        (Ok(ours), Ok(reference)) => assert_same_symbol(&ours, &reference),
-        (Err(EncodeError::DataTooLong(_)), Err(qrcode::types::QrError::DataTooLong)) => {}
+        (Ok(ours), Ok(reference)) => {
+            let theirs = version_number(reference.version());
+            assert!(
+                ours.version().number() <= theirs,
+                "v{} > v{theirs}",
+                ours.version()
+            );
+            if ours.version().number() == theirs {
+                assert_same_symbol(&ours, &reference);
+            }
+        }
+        (Ok(_) | Err(EncodeError::DataTooLong(_)), Err(qrcode::types::QrError::DataTooLong)) => {}
         (ours, reference) => panic!(
             "{} bytes at {ec}: ours {ours:?}, qrcode {:?}",
             data.len(),
@@ -109,19 +132,45 @@ proptest! {
     ) {
         let options = EncodeOptions::default().with_mask(Mask::new(mask));
         let ours = encode(data.as_bytes(), &options).unwrap();
-        let reference = reference_with_mask(data.as_bytes(), ours.version(), ours.mask());
+        let reference =
+            reference_with_mask(data.as_bytes(), ours.version(), ours.mask(), ours.segments());
         prop_assert_eq!(ours.matrix().modules(), reference.as_slice());
     }
 }
 
 /// `qrcode`'s own segmentation at `version`, with `mask` forced.
-fn reference_with_mask(data: &[u8], version: Version, mask: Mask) -> Vec<bool> {
+///
+/// Where `qrcode`'s segments do not fit `version`, `qr_core` chose a
+/// smaller version by packing the data as one segment in its narrowest
+/// mode; `ours` must then be that one segment, and it is drawn instead.
+fn reference_with_mask(data: &[u8], version: Version, mask: Mask, ours: &[Segment]) -> Vec<bool> {
     use qrcode::canvas::{Canvas, MaskPattern};
     let version = qrcode::Version::Normal(i16::from(version.number()));
     let ec = qrcode::EcLevel::M;
-    let mut bits = qrcode::bits::Bits::new(version);
-    bits.push_optimal_data(data).unwrap();
-    bits.push_terminator(ec).unwrap();
+    let greedy = || {
+        let mut bits = qrcode::bits::Bits::new(version);
+        bits.push_optimal_data(data)?;
+        bits.push_terminator(ec)?;
+        Ok::<_, qrcode::types::QrError>(bits)
+    };
+    let bits = greedy().unwrap_or_else(|_| {
+        let [single] = ours else {
+            panic!("qrcode's segments do not fit, but ours are {ours:?}")
+        };
+        assert_eq!(
+            (single.mode, single.range()),
+            (Mode::narrowest_for(data), 0..data.len())
+        );
+        let mut bits = qrcode::bits::Bits::new(version);
+        match single.mode {
+            Mode::Numeric => bits.push_numeric_data(data),
+            Mode::Alphanumeric => bits.push_alphanumeric_data(data),
+            Mode::Byte => bits.push_byte_data(data),
+        }
+        .unwrap();
+        bits.push_terminator(ec).unwrap();
+        bits
+    });
     let (codewords, ec_codewords) =
         qrcode::ec::construct_codewords(&bits.into_bytes(), version, ec).unwrap();
     let mut canvas = Canvas::new(version, ec);
@@ -155,19 +204,19 @@ fn every_mask_matches_qrcode_at_version_40() {
         assert_eq!(ours.version(), Version::MAX);
         assert_eq!(
             ours.matrix().modules(),
-            reference_with_mask(&data, Version::MAX, mask).as_slice()
+            reference_with_mask(&data, Version::MAX, mask, ours.segments()).as_slice()
         );
     }
 }
 
 /// Known-answer table: versions at EC level M for typical payloads. Before
-/// the switch to `qrcode` (PR 9), single-mode auto needed the version in
+/// the switch to `qrcode` (PR 8b), single-mode auto needed the version in
 /// the second column; segmentation now matches `qrcode` (third column).
 /// A change to segmentation must update this table deliberately.
 #[test]
 fn segmentation_matches_qrcode_on_typical_payloads() {
     let digits = |n: usize| "0123456789".repeat(n / 10 + 1)[..n].to_owned();
-    // (payload, version before PR 9, version now and with qrcode)
+    // (payload, version before PR 8b, version now and with qrcode)
     let cases: Vec<(String, u8, u8)> = vec![
         ("tel:+441234567890".into(), 2, 1),
         ("SMSTO:+447700900123:Hello there".into(), 3, 2),
@@ -309,6 +358,35 @@ fn kanji_is_never_used() {
     let reference = reference_auto(&data, EcLevel::M).unwrap();
     let modules = dark_modules(&reference);
     assert_ne!(ours.matrix().modules(), modules.as_slice());
+}
+
+/// Where `qrcode`'s greedy segmentation loses to one segment in the
+/// narrowest mode, `qr_core` picks the smaller version and the symbol
+/// still decodes; at full capacity `qrcode` reports `DataTooLong`.
+#[test]
+fn one_segment_beats_qrcodes_greedy_segmentation() {
+    let data = b"XSL790106502KNC+";
+    let at_q = EncodeOptions::default().with_ec_level(EcLevel::Q);
+    let ours = encode(data, &at_q).unwrap();
+    assert_eq!(
+        (ours.version().number(), ours.mode()),
+        (1, Mode::Alphanumeric)
+    );
+    assert!(!ours.is_mixed_mode());
+    assert_eq!(
+        version_number(reference_auto(data, EcLevel::Q).unwrap().version()),
+        2
+    );
+    let w = ours.matrix().width();
+    assert_eq!(rqrr_decode(w, ours.matrix().modules()).unwrap(), data);
+
+    let full: Vec<u8> = data.iter().copied().cycle().take(4_296).collect();
+    let at_l = EncodeOptions::default().with_ec_level(EcLevel::L);
+    assert_eq!(encode(&full, &at_l).unwrap().version(), Version::MAX);
+    assert!(matches!(
+        reference_auto(&full, EcLevel::L),
+        Err(qrcode::types::QrError::DataTooLong)
+    ));
 }
 
 #[test]

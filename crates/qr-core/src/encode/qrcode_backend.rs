@@ -2,8 +2,9 @@
 //!
 //! The owner chose `qrcode` over `fast_qr` after the PR 2 bake-off (see
 //! DECISIONS.md section 1): its lowest-penalty mask follows ISO/IEC 18004,
-//! and together with the segment-aware [`plan`] it gives the smallest
-//! symbols. `fast_qr` was about 12x faster to encode, which only matters
+//! and the segment-aware [`plan`] it can be fed gives smaller symbols than
+//! single-mode encoding for mixed data such as phone numbers and digit-heavy
+//! references. `fast_qr` was about 12x faster to encode, which only matters
 //! for large batches of version 20+ codes.
 //!
 //! The backend encodes exactly the segments and version the plan chose, so
@@ -174,11 +175,20 @@ mod tests {
 
     #[test]
     fn the_reported_mask_is_the_one_drawn() {
-        for mask in Mask::all() {
-            let options = EncodeOptions::default().with_mask(Some(mask));
-            let code = QrcodeEncoder.encode(b"mask", &options).unwrap();
-            assert_eq!(code.mask(), mask);
-            assert_eq!(format_info::read(code.matrix()), Some((EcLevel::M, mask)));
+        for ec in EcLevel::ALL {
+            for mask in Mask::all() {
+                let options = EncodeOptions::default()
+                    .with_ec_level(ec)
+                    .with_mask(Some(mask));
+                let code = QrcodeEncoder.encode(b"mask", &options).unwrap();
+                assert_eq!((code.ec_level(), code.mask()), (ec, mask));
+                assert_eq!(format_info::read(code.matrix()), Some((ec, mask)));
+            }
+            // The automatic mask is read back at every level too.
+            let auto = QrcodeEncoder
+                .encode(b"mask", &EncodeOptions::default().with_ec_level(ec))
+                .unwrap();
+            assert_eq!(format_info::read(auto.matrix()), Some((ec, auto.mask())));
         }
     }
 }

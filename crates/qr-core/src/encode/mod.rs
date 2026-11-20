@@ -74,8 +74,10 @@ impl EncodePlan {
 /// Automatic mode uses mixed-mode segmentation (see [`ModeChoice::Auto`]):
 /// for each candidate version the data is segmented for that version's
 /// character count widths, and the first version whose data capacity holds
-/// the segments is chosen. This is the same sizing as the `qrcode` crate's,
-/// except that Kanji mode is never used.
+/// the segments is chosen. This is the `qrcode` crate's sizing, except
+/// that Kanji mode is never used and that a single segment in the
+/// narrowest mode is also tried at each version, so the version is never
+/// larger than the narrowest fixed mode would give.
 ///
 /// # Errors
 ///
@@ -144,6 +146,15 @@ fn plan_fixed(
 }
 
 /// Segmented data at the smallest version that holds it.
+///
+/// The greedy merge in [`segment::optimize`] only compares each run with
+/// its left neighbour, so it can need more bits than packing the whole
+/// input as one segment in its narrowest mode (`XSL790106502KNC+` takes
+/// 109 bits greedily and 101 as one alphanumeric segment). Each version
+/// therefore also tries that single segment, so automatic mode never needs
+/// a larger version than the narrowest fixed mode. The greedy segments are
+/// preferred whenever they fit, which keeps the symbol bit-identical to
+/// `qrcode`'s whenever both pick the same version.
 fn plan_auto(data: &[u8], options: EncodeOptions) -> Result<(Vec<Segment>, Version), EncodeError> {
     let (min, max, ec) = (
         options.version.min(),
@@ -151,6 +162,7 @@ fn plan_auto(data: &[u8], options: EncodeOptions) -> Result<(Vec<Segment>, Versi
         options.ec_level,
     );
     let runs = segment::runs(data);
+    let single = single_segment(data);
     // Segmentation only changes where the count widths do (versions 10 and
     // 27), so it is computed at most once per width class.
     let mut by_class: [Option<Vec<Segment>>; 3] = Default::default();
@@ -160,10 +172,20 @@ fn plan_auto(data: &[u8], options: EncodeOptions) -> Result<(Vec<Segment>, Versi
         if segments_fit(segments, version, ec) {
             return Ok((segments.clone(), version));
         }
+        if segments_fit(&single, version, ec) {
+            return Ok((single, version));
+        }
     }
-    let segments = by_class[count_class(max)]
+    let greedy = by_class[count_class(max)]
         .get_or_insert_with(|| segment::optimize(&runs, max))
         .as_slice();
+    // Report whichever needs fewer bits at the largest version, so the
+    // error states the least the data needs.
+    let segments = if segment::total_bits(&single, max) <= segment::total_bits(greedy, max) {
+        single.as_slice()
+    } else {
+        greedy
+    };
     let error = match segments {
         // One segment is measured in its own characters, exactly as a
         // fixed mode would be.
@@ -180,6 +202,19 @@ fn plan_auto(data: &[u8], options: EncodeOptions) -> Result<(Vec<Segment>, Versi
         },
     };
     Err(error.into())
+}
+
+/// All of `data` as one segment in its narrowest mode, or no segments for
+/// empty input (as [`segment::optimize`] gives).
+fn single_segment(data: &[u8]) -> Vec<Segment> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    vec![Segment {
+        mode: Mode::narrowest_for(data),
+        start: 0,
+        end: data.len(),
+    }]
 }
 
 /// Whether `segments` fit a symbol of `version` at `ec`: every count fits
@@ -462,6 +497,58 @@ mod tests {
             (e.unit, e.mode, e.needed, e.max),
             (CapacityUnit::Characters, Mode::Numeric, 35, 34)
         );
+    }
+
+    /// Review of PR 8b (GitHub #9): greedy segmentation needs 109 bits
+    /// here (v2 at Q), one alphanumeric segment 101 (v1).
+    #[test]
+    fn auto_never_loses_to_one_segment_in_the_narrowest_mode() {
+        let data = b"XSL790106502KNC+";
+        let runs = segment::runs(data);
+        let greedy = segment::optimize(&runs, v(1));
+        assert_eq!(segment::total_bits(&greedy, v(1)), 109);
+        let q = EncodeOptions::default().with_ec_level(EcLevel::Q);
+        let p = plan(data, &q).unwrap();
+        assert_eq!(p.version, v(1));
+        assert_eq!(p.segments, single_segment(data));
+        assert_eq!((p.mode(), p.bits()), (Mode::Alphanumeric, 101));
+        let fixed = plan(data, &q.with_mode(ModeChoice::Fixed(Mode::Alphanumeric))).unwrap();
+        assert_eq!(fixed.version, p.version);
+    }
+
+    /// The same pattern at full alphanumeric capacity (4,296 characters at
+    /// v40-L) fits as one segment; greedy segments would need 27,933 bits.
+    /// One more character is reported in characters, like a fixed mode.
+    #[test]
+    fn auto_keeps_the_single_mode_capacity_ceiling() {
+        let pattern = b"XSL790106502KNC+";
+        for ec in EcLevel::ALL {
+            let n = max_chars(Mode::Alphanumeric, Version::MAX, ec);
+            let data: Vec<u8> = pattern.iter().copied().cycle().take(n).collect();
+            let o = EncodeOptions::default().with_ec_level(ec);
+            let p = plan(&data, &o).unwrap();
+            assert_eq!(
+                (p.version, p.mode()),
+                (Version::MAX, Mode::Alphanumeric),
+                "{ec}"
+            );
+            assert_eq!(p.segments.len(), 1, "{ec}");
+
+            let longer: Vec<u8> = pattern.iter().copied().cycle().take(n + 1).collect();
+            let EncodeError::DataTooLong(e) = plan(&longer, &o).unwrap_err() else {
+                panic!("expected a capacity error at {ec}")
+            };
+            assert_eq!(
+                (e.unit, e.mode, e.needed, e.max),
+                (CapacityUnit::Characters, Mode::Alphanumeric, n + 1, n),
+                "{ec}"
+            );
+        }
+        let n = max_chars(Mode::Alphanumeric, Version::MAX, EcLevel::L);
+        assert_eq!(n, 4_296);
+        let data: Vec<u8> = pattern.iter().copied().cycle().take(n).collect();
+        let greedy = segment::optimize(&segment::runs(&data), Version::MAX);
+        assert_eq!(segment::total_bits(&greedy, Version::MAX), 27_933);
     }
 
     #[test]
