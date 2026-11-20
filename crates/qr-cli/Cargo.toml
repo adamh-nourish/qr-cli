@@ -48,3 +48,7 @@ image = { workspace = true, features = ["png", "jpeg", "webp"] }
 
 [lints]
 workspace = true
+
+# publish = false hides the package from dist; opt the `qr` binary in.
+[package.metadata.dist]
+dist = true

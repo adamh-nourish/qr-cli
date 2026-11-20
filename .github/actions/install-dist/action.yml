@@ -1,0 +1,60 @@
+name: Install dist (cargo-dist)
+description: >-
+  Downloads a pinned cargo-dist release binary for the runner and checks its
+  SHA-256 before putting it in Cargo's bin directory (no `curl | sh`, no
+  unverified download). Run it after dtolnay/rust-toolchain, which puts that
+  directory on PATH.
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify dist
+      shell: bash
+      env:
+        # Keep in sync with cargo-dist-version in dist-workspace.toml. The
+        # hashes are the release's own sha256.sum for v0.34.0.
+        DIST_VERSION: "0.34.0"
+        SHA256_X86_64_LINUX: f274b9889e93333a52cdcab86b93ab04b875b8ef4eebc7f8589514e0aff827e6
+        SHA256_AARCH64_LINUX: aac7d48901f5283b53e136dd0498782c88a3350dfa4a5e88f4c3e0ba7e486eea
+        SHA256_AARCH64_MACOS: d1eec30e63eed23e5a5bd48fe96eae314799811bffca254ec1d2264638ba1890
+        SHA256_X86_64_MACOS: 6aa89bb1e7c18f51ae8b148ce2fc6ab00ac46ed8173d4f2ed9afa12101218773
+        SHA256_X86_64_WINDOWS: 7bb53fbc998321f77a3bbb044084a52747c8ed041cf6d6a604802aa57b9c80c6
+      run: |
+        # cargo-dist publishes no Arm64 Windows build; windows-11-arm runs
+        # the x64 one under emulation.
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64) triple=x86_64-unknown-linux-musl; sha=$SHA256_X86_64_LINUX ;;
+          Linux-ARM64) triple=aarch64-unknown-linux-musl; sha=$SHA256_AARCH64_LINUX ;;
+          macOS-ARM64) triple=aarch64-apple-darwin; sha=$SHA256_AARCH64_MACOS ;;
+          macOS-X64) triple=x86_64-apple-darwin; sha=$SHA256_X86_64_MACOS ;;
+          Windows-X64 | Windows-ARM64) triple=x86_64-pc-windows-msvc; sha=$SHA256_X86_64_WINDOWS ;;
+          *) echo "::error::no pinned dist build for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+        esac
+        if [[ $RUNNER_OS == Windows ]]; then ext=zip; else ext=tar.xz; fi
+        archive="cargo-dist-${triple}.${ext}"
+        dir="$RUNNER_TEMP/dist-${DIST_VERSION}"
+        mkdir -p "$dir"
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$dir/$archive" \
+          "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/${archive}"
+        if command -v sha256sum > /dev/null; then
+          echo "${sha}  $dir/$archive" | sha256sum --check --strict
+        else
+          echo "${sha}  $dir/$archive" | shasum -a 256 --check --strict
+        fi
+        mkdir -p "$dir/bin"
+        if [[ $ext == zip ]]; then
+          if command -v unzip > /dev/null; then
+            unzip -q -o "$dir/$archive" dist.exe -d "$dir/bin"
+          else
+            powershell.exe -NoProfile -NonInteractive -Command \
+              "Expand-Archive -Force -LiteralPath '$dir/$archive' -DestinationPath '$dir/bin'"
+          fi
+        else
+          tar -xJf "$dir/$archive" -C "$dir/bin" --strip-components=1 "cargo-dist-${triple}/dist"
+        fi
+        # Cargo's bin directory is already on PATH, so nothing is written to
+        # GITHUB_PATH.
+        cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+        mkdir -p "$cargo_bin"
+        cp "$dir/bin/"dist* "$cargo_bin/"
+        dist --version

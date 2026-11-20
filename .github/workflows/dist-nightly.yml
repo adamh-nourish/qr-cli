@@ -1,0 +1,22 @@
+name: Dist (nightly)
+
+# The full release matrix without publishing (DECISIONS.md section 7,
+# nightly): every archive is built, checksummed and smoke tested on its own
+# target, so a broken target shows up before a tag does. Non-blocking.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and smoke test
+    permissions:
+      contents: read
+    uses: ./.github/workflows/dist-build.yml

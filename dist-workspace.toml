@@ -1,0 +1,57 @@
+# cargo-dist (`dist`) configuration: what a release contains
+# (docs/design/DECISIONS.md section 6).
+#
+# v1 distribution is GitHub Releases, the shell and PowerShell installers and
+# a documented `cargo install --git`. No Homebrew tap, Scoop, winget,
+# crates.io publish or attestations, so no publish jobs and no secrets.
+#
+# The workflows that run dist are written by hand
+# (.github/workflows/dist-build.yml and release.yml), because the generated
+# release.yml installs tools with `curl | sh`, pins actions by tag, grants
+# `contents: write` to every job and runs on pull requests. `allow-dirty`
+# stops `dist plan` and `dist build` from insisting on the generated copy.
+# After upgrading dist, diff `dist generate` output against those files.
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+# Keep in sync with DIST_VERSION in .github/actions/install-dist/action.yml.
+cargo-dist-version = "0.34.0"
+ci = "github"
+allow-dirty = ["ci"]
+pr-run-mode = "plan"
+installers = ["shell", "powershell"]
+# Keep in sync with the matrix in .github/workflows/dist-build.yml.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+unix-archive = ".tar.xz"
+windows-archive = ".zip"
+checksum = "sha256"
+# Statically link the MSVC C runtime, so qr.exe needs no VC++ redistributable.
+msvc-crt-static = true
+# Embed the dependency list for `cargo audit bin` (rust-secure-code).
+cargo-auditable = true
+# The installers put `qr` in $CARGO_HOME/bin (~/.cargo/bin) and do not
+# install a self-updater.
+install-path = "CARGO_HOME"
+install-updater = false
+# Generated before `dist build` by scripts/dist-extras.sh from `qr
+# completions` and `qr man` (bash, zsh, fish, PowerShell, elvish, roff).
+# LICENSE-*, README.md and CHANGELOG.md are picked up automatically.
+include = ["dist-extras/completions", "dist-extras/man"]
+# Runners dist would choose; the hand-written matrix uses the same ones,
+# with native Arm runners so every target is smoke tested where it runs.
+[dist.github-custom-runners]
+x86_64-unknown-linux-musl = "ubuntu-24.04"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
+aarch64-apple-darwin = "macos-15"
+x86_64-apple-darwin = "macos-15"
+x86_64-pc-windows-msvc = "windows-2025"
+aarch64-pc-windows-msvc = "windows-11-arm"

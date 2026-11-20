@@ -71,3 +71,8 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# The profile `dist build` uses for release archives: the release profile
+# above, so the shipped binary is the one the size and startup gates measure.
+[profile.dist]
+inherits = "release"
