@@ -1,0 +1,105 @@
+name: Release
+
+# Pushing a `vX.Y.Z` tag builds every archive and installer (dist-build.yml),
+# smoke tests each archive on its own target, and only then creates the
+# GitHub Release. v1 distribution is GitHub Releases, the shell and
+# PowerShell installers and `cargo install --git` (DECISIONS.md section 6):
+# no package registries, no attestations and no secrets beyond the
+# workflow's own GITHUB_TOKEN.
+#
+# To release: see CHANGELOG.md, then `git tag -s vX.Y.Z && git push origin vX.Y.Z`.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Each job asks for what it needs; only `publish` can write.
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and smoke test
+    permissions:
+      contents: read
+    uses: ./.github/workflows/dist-build.yml
+    with:
+      tag: ${{ github.ref_name }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # creates the release and uploads its assets
+    # No checkout: nothing from the repository runs while the token can write.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: release-notes
+      - name: Check the checksums and create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The per-build manifests are dist's bookkeeping, not release assets.
+          rm -f artifacts/*dist-manifest.json
+          (cd artifacts && sha256sum --check sha256.sum)
+          args=(release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag
+            --title "$(cat release-notes/title.txt)"
+            --notes-file release-notes/notes.md)
+          if [[ $(cat release-notes/prerelease.txt) == true ]]; then
+            args+=(--prerelease)
+          fi
+          gh "${args[@]}" artifacts/*
+          echo "### Released ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          (cd artifacts && ls -l) >> "$GITHUB_STEP_SUMMARY"
+
+  installers:
+    name: Installer (${{ matrix.runner }})
+    needs: publish
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Installs from the public release exactly as the README says, into a
+      # scratch directory, then smoke tests the installed binary.
+      - name: Install from the release and smoke test
+        env:
+          TAG: ${{ github.ref_name }}
+          QR_CLI_NO_MODIFY_PATH: "1"
+        run: |
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          export QR_CLI_INSTALL_DIR="$RUNNER_TEMP/qr-install"
+          if [[ $RUNNER_OS == Windows ]]; then
+            curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o installer.ps1 "$base/qr-cli-installer.ps1"
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer.ps1
+            bin="$QR_CLI_INSTALL_DIR/bin/qr.exe"
+          else
+            curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o installer.sh "$base/qr-cli-installer.sh"
+            sh installer.sh
+            bin="$QR_CLI_INSTALL_DIR/bin/qr"
+          fi
+          scripts/smoke-test.sh "$bin" "${TAG#v}"

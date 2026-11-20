@@ -72,6 +72,24 @@ cargo llvm-cov nextest --workspace --locked --summary-only
 - Keep each PR under about 400 changed lines where possible.
 - New GitHub Actions must be pinned to a full commit SHA with a version comment.
 
+## Releases
+
+Releases are built by [dist](https://opensource.axo.dev/cargo-dist/)
+(`dist-workspace.toml`) in `.github/workflows/dist-build.yml`. To check
+packaging locally (`brew install cargo-dist cargo-auditable`):
+
+```sh
+dist plan
+cargo build --locked -p qr-cli --bin qr && scripts/dist-extras.sh target/debug/qr
+dist build --artifacts=all --target "$(rustc -vV | sed -n 's/^host: //p')"
+scripts/verify-archive.sh target/distrib "$(rustc -vV | sed -n 's/^host: //p')"
+```
+
+To release: move the **Unreleased** entries in `CHANGELOG.md` into a dated
+version section, bump `version` in `Cargo.toml`, merge, then push the tag
+`vX.Y.Z`. `release.yml` builds and smoke tests every target before it
+creates the GitHub Release.
+
 ## Licence
 
 By contributing you agree that your contributions are dual-licensed under

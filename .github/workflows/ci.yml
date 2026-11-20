@@ -238,12 +238,36 @@ jobs:
           echo "median startup: ${median_ms} ms (limit ${MAX_STARTUP_MS} ms)"
           awk -v m="$median_ms" -v max="$MAX_STARTUP_MS" 'BEGIN { exit !(m <= max) }'
 
+  dist-plan:
+    name: Packaging (dist plan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: ./.github/actions/install-dist
+      # Validates dist-workspace.toml and the release contents for the
+      # current version; the full build runs on tags and nightly.
+      - name: dist plan
+        run: |
+          dist plan | tee plan.txt
+          {
+            echo '### dist plan'
+            echo '```'
+            cat plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Single stable check name to mark as required once branch protection is
   # available; new jobs only need adding to `needs`.
   ci-success:
     name: CI success
     if: always()
-    needs: [fmt, clippy, test, coverage, docs, msrv, deny, workflow-lint, perf-gates]
+    needs: [fmt, clippy, test, coverage, docs, msrv, deny, workflow-lint, perf-gates, dist-plan]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

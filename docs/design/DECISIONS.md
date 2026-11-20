@@ -184,6 +184,7 @@ qr man
 - **On each target,** a smoke test checks `--version`, generates a PNG and an SVG, decodes the PNG, and compares the result with the input.
 - The full matrix runs only on tags and nightly. PRs run `dist plan`.
 - Everything else waits for a "go public" checklist PR.
+- **PR 13 (owner decision, 2026-11-20, repo now public):** v1 ships GitHub Releases, the shell and PowerShell installers and `cargo install --git` only: no Homebrew tap, Scoop, winget, crates.io publish or attestations, so the release needs no secrets. `dist-workspace.toml` holds the dist config; the workflows are written by hand (`dist-build.yml`, called by `release.yml` on a `v*` tag and by `dist-nightly.yml`), because the generated one installs tools with `curl | sh`, pins actions by tag and grants `contents: write` to every job. dist itself is a checksum-pinned release binary (`.github/actions/install-dist`). Completions and the man page are generated once per build from `qr completions`/`qr man` (`scripts/dist-extras.sh`). Each archive is checksum-verified, checked for its contents and smoke tested on its own runner (`scripts/verify-archive.sh`; x86_64 macOS on `macos-15-intel`) before `publish`, the only job that can write, creates the release; after it, each installer is run from the release and smoke tested. `tests/packaging.rs` pins all of this.
 
 ## 7. CI checks (`ci.yml`, all actions SHA-pinned, `permissions: contents: read`, `persist-credentials: false`)
 

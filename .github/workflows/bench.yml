@@ -1,0 +1,83 @@
+name: Bench (nightly)
+
+# Tracked performance numbers (DECISIONS.md section 5): the divan benchmarks
+# in qr-core (per-format render times, encode times and the
+# `batch_item_png_256` batch baseline from issue #10) and `qr --version`
+# startup. Results are uploaded as an artefact; nothing here blocks a merge.
+# Comparing runs against the baseline (the 20% drift rule) can build on the
+# artefact's fixed file names.
+on:
+  schedule:
+    - cron: "29 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  # Keep in sync with rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.99"
+
+jobs:
+  bench:
+    name: divan and startup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: hyperfine
+      - name: Record the environment
+        run: |
+          mkdir -p bench-results
+          {
+            echo "commit: ${GITHUB_SHA}"
+            echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner: ${RUNNER_OS} ${RUNNER_ARCH} ($(nproc) cpus)"
+            rustc -vV
+          } > bench-results/environment.txt
+          cat bench-results/environment.txt
+      - name: divan (qr-core encode and render)
+        run: |
+          for bench in encode render; do
+            cargo bench --locked --package qr-core --bench "$bench" \
+              | tee "bench-results/divan-${bench}.txt"
+          done
+      - name: Startup (qr --version, release profile)
+        run: |
+          cargo build --release --locked --package qr-cli --bin qr
+          hyperfine --warmup 5 --runs 50 --shell=none \
+            --export-json bench-results/startup.json \
+            --export-markdown bench-results/startup.md \
+            "target/release/qr --version"
+      - name: Summary
+        run: |
+          {
+            echo "### Bench (${GITHUB_SHA::12})"
+            cat bench-results/startup.md
+            echo '```'
+            cat bench-results/divan-render.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-${{ github.run_number }}-${{ github.sha }}
+          path: bench-results/
+          if-no-files-found: error
+          retention-days: 90

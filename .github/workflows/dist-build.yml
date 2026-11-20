@@ -1,0 +1,239 @@
+name: Dist build
+
+# Builds every release archive and installer with dist (cargo-dist) and
+# smoke tests each archive on its own target (DECISIONS.md section 6). It
+# publishes nothing and holds no write permission: release.yml calls it for a
+# `v*` tag and then publishes, and dist-nightly.yml calls it on a schedule.
+#
+# Written by hand instead of `dist generate` (see dist-workspace.toml): tools
+# are checksum-verified, actions are SHA-pinned, and nothing is cached, so a
+# poisoned cache cannot reach a release build.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z); empty for a dry run of the current version
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Keep in sync with rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.99"
+  CARGO_AUDITABLE_VERSION: "0.7.7"
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: ./.github/actions/install-dist
+      - name: dist plan
+        id: plan
+        run: |
+          args=(plan --output-format=json)
+          if [[ -n $TAG ]]; then
+            if [[ ! $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH[-PRE]"
+              exit 1
+            fi
+            # A release needs its CHANGELOG.md section (Keep a Changelog).
+            if ! grep -Fq "## [${TAG#v}]" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## [${TAG#v}]' section"
+              exit 1
+            fi
+            # dist also fails if no package has this version.
+            args+=("--tag=$TAG")
+          fi
+          dist "${args[@]}" > plan-dist-manifest.json
+          version=$(jq -r '.releases[0].app_version' plan-dist-manifest.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p release-notes
+          jq -r '.announcement_title' plan-dist-manifest.json > release-notes/title.txt
+          jq -r '.announcement_github_body' plan-dist-manifest.json > release-notes/notes.md
+          jq -r '.announcement_is_prerelease' plan-dist-manifest.json > release-notes/prerelease.txt
+          {
+            echo "### dist plan (qr-cli ${version})"
+            echo '```'
+            dist plan ${TAG:+"--tag=$TAG"}
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-plan-dist-manifest
+          path: plan-dist-manifest.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes/
+          if-no-files-found: error
+
+  extras:
+    name: Completions and man page
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # The scripts depend only on the clap definition, so one host build
+      # serves every target.
+      - run: cargo build --locked --package qr-cli --bin qr
+      - run: scripts/dist-extras.sh target/debug/qr dist-extras
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-extras
+          path: dist-extras/
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [plan, extras]
+    strategy:
+      fail-fast: false
+      # Keep in sync with `targets` and `github-custom-runners` in
+      # dist-workspace.toml.
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, runner: macos-15 }
+          # Cross-built on Apple silicon; smoke tested on Intel below.
+          - { target: x86_64-apple-darwin, runner: macos-15 }
+          - { target: x86_64-pc-windows-msvc, runner: windows-2025 }
+          - { target: aarch64-pc-windows-msvc, runner: windows-11-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      # Checksum-verified release binary.
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-auditable@${{ env.CARGO_AUDITABLE_VERSION }}
+      - uses: ./.github/actions/install-dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-extras
+          path: dist-extras
+      - name: dist build
+        run: |
+          args=(build --artifacts=local "--target=$TARGET" --print=linkage --output-format=json)
+          if [[ -n $TAG ]]; then args+=("--tag=$TAG"); fi
+          dist "${args[@]}" > dist-manifest.json
+          mkdir -p target/distrib
+          cp dist-manifest.json "target/distrib/${TARGET}-dist-manifest.json"
+      - name: List the files to upload
+        id: files
+        run: |
+          {
+            echo "paths<<EOF"
+            dist print-upload-files-from-manifest --manifest dist-manifest.json
+            echo "target/distrib/${TARGET}-dist-manifest.json"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: ${{ steps.files.outputs.paths }}
+          if-no-files-found: error
+
+  global:
+    name: Installers and checksums
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: ./.github/actions/install-dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: dist build (global)
+        id: global
+        run: |
+          args=(build --artifacts=global --output-format=json)
+          if [[ -n $TAG ]]; then args+=("--tag=$TAG"); fi
+          dist "${args[@]}" > dist-manifest.json
+          cp dist-manifest.json target/distrib/global-dist-manifest.json
+          {
+            echo "paths<<EOF"
+            jq -r '.upload_files[]' dist-manifest.json
+            echo "target/distrib/global-dist-manifest.json"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-build-global
+          path: ${{ steps.global.outputs.paths }}
+          if-no-files-found: error
+
+  smoke:
+    name: Smoke ${{ matrix.target }}
+    needs: [plan, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, runner: macos-15 }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel }
+          - { target: x86_64-pc-windows-msvc, runner: windows-2025 }
+          - { target: aarch64-pc-windows-msvc, runner: windows-11-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      # Only for scripts/; the binary under test comes from the archive.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: distrib
+      - name: Verify the archive and smoke test its binary
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          # upload-artifact keeps paths below the files' common directory.
+          dir=$(dirname "$(find distrib -name "qr-cli-${TARGET}.*.sha256" | head -n 1)")
+          scripts/verify-archive.sh "$dir" "$TARGET" "$VERSION"
