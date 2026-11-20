@@ -270,6 +270,7 @@ fn readme_states_the_exit_codes_the_binary_documents() {
     );
     for line in [
         "| 0 | OK |",
+        "| 1 | Internal error |",
         "| 2 | Usage error",
         "| 3 | Data too long",
         "| 4 | I/O error",
@@ -359,6 +360,31 @@ fn seed_fixtures(dir: &Path) {
         .unwrap();
 }
 
+/// Replaces the byte count in `"written":N` with `N`, because the size of an
+/// encoded file can change between releases while the format does not.
+fn normalise_written(text: &str) -> String {
+    const KEY: &str = "\"written\":";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        let (head, tail) = rest.split_at(at + KEY.len());
+        out.push_str(head);
+        out.push('N');
+        rest = tail.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn normalise_written_masks_only_the_count() {
+    assert_eq!(
+        normalise_written(r#"{"written":428,"x":1} {"written":7}"#),
+        r#"{"written":N,"x":1} {"written":N}"#
+    );
+    assert_eq!(normalise_written("no key here"), "no key here");
+}
+
 #[cfg(unix)]
 #[test]
 fn readme_examples_run() {
@@ -366,12 +392,8 @@ fn readme_examples_run() {
     use std::process::Command as Shell;
 
     let (_, blocks) = parse_markdown(&readme());
-    let runnable: Vec<&Block> = blocks.iter().filter(|block| block.info == "sh").collect();
-    assert!(
-        runnable.len() >= 30,
-        "only {} runnable examples found",
-        runnable.len()
-    );
+    let runnable = blocks.iter().filter(|block| block.info == "sh").count();
+    assert!(runnable >= 30, "only {runnable} runnable examples found");
 
     let work = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
@@ -384,22 +406,46 @@ fn readme_examples_run() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    for (index, block) in runnable.iter().enumerate() {
-        let script = scripts.path().join(format!("example-{index}.sh"));
-        fs::write(&script, format!("set -e\n{}", block.body)).unwrap();
-        let output = Shell::new("sh")
-            .arg(&script)
-            .current_dir(work.path())
-            .env("PATH", &path)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "the README example at line {} failed with {}:\n{}\nstderr:\n{}",
-            block.line,
-            output.status,
-            block.body,
-            String::from_utf8_lossy(&output.stderr)
-        );
+    // The output (stdout, then stderr) of the most recent `sh` block. A block
+    // tagged `... expected` must directly follow an `sh` block, and its body
+    // must equal that output, with the `written` sizes normalised.
+    let mut last_output = String::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if block.info == "sh" {
+            let script = scripts.path().join(format!("example-{index}.sh"));
+            fs::write(&script, format!("set -e\n{}", block.body)).unwrap();
+            let output = Shell::new("sh")
+                .arg(&script)
+                .current_dir(work.path())
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "the README example at line {} failed with {}:\n{}\nstderr:\n{}",
+                block.line,
+                output.status,
+                block.body,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            last_output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        } else if block.info.ends_with(" expected") {
+            let follows_sh = index > 0 && blocks[index - 1].info == "sh";
+            assert!(
+                follows_sh,
+                "the expected output at line {} must directly follow an `sh` block",
+                block.line
+            );
+            assert_eq!(
+                normalise_written(last_output.trim_end()),
+                normalise_written(block.body.trim_end()),
+                "the README output at line {} differs from the real output",
+                block.line
+            );
+        }
     }
 }

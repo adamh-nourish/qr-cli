@@ -75,9 +75,12 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/adamh-nourish/qr-cli/re
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/adamh-nourish/qr-cli/releases/latest/download/qr-cli-installer.ps1 | iex"
 ```
 
-Both installers check the archive's SHA-256 checksum and put `qr` in
-`~/.cargo/bin` (on Windows, `%USERPROFILE%\.cargo\bin`). Two environment
-variables change that:
+The shell installer checks the archive's SHA-256 checksum when `sha256sum` is on
+your `PATH`. Without it, the installer prints `skipping sha256 checksum
+verification` and installs anyway. The PowerShell installer does not check the
+checksum at all, so Windows users who want to verify the archive should use the
+manual download below. Both installers put `qr` in `~/.cargo/bin` (on Windows,
+`%USERPROFILE%\.cargo\bin`). Two environment variables change that:
 
 | Variable | Effect |
 |---|---|
@@ -141,7 +144,8 @@ The binaries are not code-signed yet. A browser download may trigger a
 Gatekeeper warning on macOS or a SmartScreen warning on Windows. The shell and
 PowerShell installers and `cargo install` are not affected. Release binaries are
 built with [`cargo auditable`](https://github.com/rust-secure-code/cargo-auditable),
-so `cargo audit bin qr` can check them against known vulnerabilities.
+so `cargo audit bin "$(command -v qr)"` can check the installed binary against
+known vulnerabilities. `cargo audit bin` needs a path to the binary, not its name.
 
 ### The name `qr` is shared
 
@@ -244,6 +248,9 @@ qr 'hello' -f svg -o - > stdout.svg
 
 `-o -` writes to standard output. Without `-f`, the format there is text. Binary
 formats need `-f`, and `qr` refuses to write binary output to a terminal.
+`-f terminal` with an `-o` path writes text into that file, and prints a warning
+if the extension suggests an image: `qr 'hello' -f terminal -o hello.png` makes
+a text file named `.png`. Leave out `-f` to get an image.
 
 ### Data URIs
 
@@ -357,9 +364,9 @@ Byte-mode capacity at the largest version (40) is:
 | H | 1,273 |
 
 When the data does not fit, `qr` reports its length, the maximum at the chosen
-level, and a hint such as using a lower level. Input from the command line or
-standard input is read up to 7,089 bytes; a longer input is refused with exit
-code 3.
+level, and a hint such as using a lower level. Standard input and `-i` files are
+read up to 7,089 bytes, and a longer one is refused with exit code 3. A long
+`TEXT` argument gets the normal data-too-long error (also exit code 3) instead.
 
 ### Verification
 
@@ -374,7 +381,8 @@ qr 'https://example.com' --verify -o checked.png
 Verification runs automatically for images with a `--logo`, a non-default
 `--shape`, `--fg` or `--bg`, `--transparent`, or `--invert`. Use `--no-verify` to
 skip it. That is faster, and it suits large batches of styled codes whose
-output you have already checked once.
+output you have already checked once. If both `--verify` and `--no-verify` are
+given, the last one wins.
 
 ### Colour in the terminal
 
@@ -461,9 +469,10 @@ code holds it.
 
 ### `qr vcard`
 
-Encodes a contact card (vCard 3.0). The name is the only argument. The other
-fields can be given as options, and `--phone`, `--email`, `--url` and `--address`
-can be repeated. The options are `--note`, `--org` and `--title`.
+Encodes a contact card (vCard 3.0). The name is the only argument. Options:
+`--phone` and `--email` (both repeatable), and `--url`, `--address`, `--note`,
+`--org` and `--title` (each given at most once; a repeat is a usage error,
+exit 2).
 
 ```sh
 qr vcard 'Ada Lovelace' --phone '+44 20 7946 0000' --email ada@example.com -o ada.png
@@ -474,8 +483,8 @@ qr vcard 'Ada Lovelace' --org 'Analytical Engines' --title Engineer \
 ### `qr mecard`
 
 Encodes a compact contact card (MeCard). It has fewer fields than a vCard, so
-the code is smaller. Options: `--phone`, `--email`, `--url` and `--address`
-(all repeatable), and `--note`.
+the code is smaller. Options: `--phone` and `--email` (both repeatable), and
+`--url`, `--address` and `--note` (each given at most once).
 
 ```sh
 qr mecard 'Ada Lovelace' --phone '+44 20 7946 0000'
@@ -583,6 +592,17 @@ qr decode code.png --raw > data.txt
 qr decode code.png dots.png --json
 ```
 
+A styled code reads back the same way:
+
+```sh
+qr 'https://example.com/menu' --shape dots --fg navy -o menu.png
+qr decode menu.png
+```
+
+```text expected
+https://example.com/menu
+```
+
 `qr decode` reads PNG, JPEG and WebP only. To read back SVG or PDF output,
 render a PNG of the same code.
 
@@ -596,6 +616,18 @@ qr batch urls.csv --out-dir codes
 qr batch urls.txt --lines --out-dir lines --name 'url-{n:04}' -f svg
 qr batch rows.csv --out-dir named --name '{name}-{n:04}'
 ```
+
+The examples name files you supply: `urls.csv`, `urls.txt`, `rows.csv`,
+`pw.txt`, `key.txt` and `logo.png` stand for your own files. A `rows.csv` with a
+header and two rows:
+
+```csv
+data,name
+https://example.com/a,alpha
+https://example.com/b,beta
+```
+
+makes `named/alpha-0001.png` and `named/beta-0002.png` from the third example.
 
 ### Input
 
@@ -666,12 +698,17 @@ looks like this:
 
 ```sh
 qr batch rows.csv --out-dir ndjson-out --json > report.ndjson
+cat report.ndjson
 ```
 
-```json
+```json expected
 {"row":1,"line":2,"output":"ndjson-out/1.png","format":"png","version":2,"ec":"M","mode":"byte","mask":1,"modules":25,"bytes":21,"written":428}
+{"row":2,"line":3,"output":"ndjson-out/2.png","format":"png","version":2,"ec":"M","mode":"byte","mask":1,"modules":25,"bytes":21,"written":435}
 {"summary":{"rows":2,"written":2,"failed":0,"skipped":0}}
 ```
+
+The `written` sizes depend on the encoder, so they can differ by a byte or two
+between releases.
 
 A failed row has the same `row` and `line` keys, with an `error` object that
 holds the same `code`, `message` and `hint` keys as the errors below.
@@ -702,13 +739,20 @@ The object has these keys:
 
 ### Errors
 
-With `--json`, errors go to standard error as one object:
+With `--json`, errors go to standard error as one object. Writing over an
+existing file without `--force` gives this:
 
-```json
+```sh
+qr 'hello' -o code.svg
+qr 'hello' -o code.svg --no-clobber --json || true
+```
+
+```json expected
 {"error":{"code":"output_exists","message":"output file 'code.svg' already exists","hint":"remove it, choose another path or drop --no-clobber"}}
 ```
 
-Each error has a `code`, a `message` and one `hint`. The codes you are most
+Each error has a `code` and a `message`, and usually a `hint`. Usage errors from
+the argument parser, such as an unknown option, have no hint. The codes you are most
 likely to see are `usage`, `data_too_long`, `output_exists`, `read_failed`,
 `write_failed`, `invalid_logo`, `verification_failed`, `no_code_found`,
 `too_many_finders` and `batch_incomplete`.
@@ -794,21 +838,25 @@ a public issue.
 ## Performance notes
 
 - **One-shot commands** start no threads. Only `qr batch` starts a worker pool.
-- **Batch throughput.** On the development Mac, 10,000 short URLs written as
-  256-pixel PNG files with `--jobs 4` took about 2.3 seconds (about 4,400 codes
-  per second), with a peak resident size of about 9 MB. The design target is
-  2,500 codes per second on a four-core runner. Throughput depends on your
-  hardware, the payload length and the output size.
-- **Verification costs memory and time.** In the design measurements, reading
-  back a version 40 PNG raised its peak memory from about 3.4 MiB to about
-  10 MiB. For large runs of styled codes, `--no-verify` skips the read-back.
-- **WebP is the most memory-hungry format on large codes.** The encoder alone
-  needed about 80 MiB at `--size 4000` in the design measurements. Prefer PNG
-  for big images.
-- **Vector output** (`svg`, `pdf`, `eps`) does not rasterise the code, so it is
-  the lightest choice for a single large code.
-- **Size.** `--size` sets the overall image size directly, and `--scale` sets a
-  fixed module size. Memory for PNG and WebP grows with the pixel count.
+- **Batch throughput.** On an Apple M4 Pro (14 cores), 10,000 short URLs written
+  as 256-pixel PNG files with `--jobs 4` took about 1.6 to 2.0 seconds (about
+  5,000 to 6,000 codes per second), with a peak resident size of about 10 MB.
+  That run used four workers on a 14-core machine, so it is not the four-core
+  runner that the design target (2,500 codes per second) names. Throughput
+  depends on your hardware, the payload length and the output size.
+- **Memory by format.** For a version 40 code (2,300 bytes), peak resident
+  memory is about 4 MiB for PNG, SVG and PDF alike. Styled output costs more.
+  With `--shape dots`, PNG peaks at about 12 MiB, SVG at about 21 MiB and PDF at
+  about 18 MiB, because verification redraws vector output as pixels. With
+  `--no-verify`, PNG stays at about 4 MiB and SVG is about 17 MiB. Of the formats
+  measured, PNG is the lightest, and styled vector output costs more than PNG.
+  These are single runs, so expect some variation.
+- **WebP is the one format whose memory grows with the pixel count.** It peaks
+  at about 80 MiB at `--size 4000`, with or without verification. Prefer PNG for
+  big images. Measured on an Apple M4 Pro with a release build.
+- **Verification costs memory and time.** It reads the rendered code back, so
+  styled output needs more memory than `--no-verify`. For large runs of styled
+  codes, `--no-verify` skips the read-back.
 
 ## Troubleshooting and FAQ
 
@@ -829,9 +877,11 @@ part of the scan.
 **`cannot infer the output format`.** The extension is not one of `.png`,
 `.svg`, `.jpg`, `.jpeg`, `.webp`, `.pdf`, `.eps` or `.txt`. Pass `-f FORMAT`.
 
-**`output file … already exists`.** `--no-clobber` is set, or a file of that name
-already exists in a batch directory. Remove the old file, choose another name,
-or use `--force` with `qr batch`.
+**`output file … already exists`, or `row N (line L): 'dir/1.png' already exists`
+in a batch.** `--no-clobber` is set, or a file of that name already exists. A
+batch reports the row and the file, as in `row 1 (line 2): 'out/alpha.png' already
+exists`. Remove the old file, choose another name, or use `--force` with
+`qr batch`.
 
 **`qr decode` cannot read my SVG or PDF.** Decoding handles PNG, JPEG and WebP
 only. Render a PNG of the code and decode that.
