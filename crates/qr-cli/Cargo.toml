@@ -25,6 +25,9 @@ thiserror.workspace = true
 tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `qr batch` only: the one-shot path never starts a thread pool.
+rayon.workspace = true
+csv.workspace = true
 
 # O_NONBLOCK, so opening an image or logo path never blocks on a FIFO.
 [target.'cfg(unix)'.dependencies]

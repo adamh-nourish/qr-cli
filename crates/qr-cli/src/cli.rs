@@ -2,8 +2,8 @@
 //!
 //! Generation is the root command (`qr [OPTIONS] [TEXT]`); subcommands
 //! build structured [`payload`]s (`qr wifi`, `qr vcard`, ...), read codes
-//! back (`qr decode`, [`DecodeArgs`]) or are tooling; a later change adds
-//! `batch`. Keeping every clap type in this module lets completions and
+//! back (`qr decode`, [`DecodeArgs`]), write many codes (`qr batch`,
+//! [`BatchArgs`]) or are tooling. Keeping every clap type in this module lets completions and
 //! the man page be generated from a single source of truth.
 
 use std::path::PathBuf;
@@ -42,6 +42,8 @@ Examples:
   qr wifi --ssid Home --password-stdin < pw.txt
                                Share a WiFi network (see 'qr wifi --help')
   qr decode code.png           Print the data held in an image's QR codes
+  qr batch urls.csv --out-dir codes
+                               Write one PNG per CSV row (see 'qr batch --help')
   qr -- wifi                   Encode a word that is also a command name,
                                such as 'wifi', 'url', 'email' or 'help'
 
@@ -89,6 +91,7 @@ impl Cli {
     pub fn json(&self) -> bool {
         match &self.command {
             Some(Command::Decode(decode)) => decode.json,
+            Some(Command::Batch(batch)) => batch.json,
             _ => self.render_args().json,
         }
     }
@@ -105,6 +108,9 @@ pub enum Command {
     Payload(PayloadCommand),
     /// Read the QR codes in PNG, JPEG or WebP images and print their data.
     Decode(DecodeArgs),
+    /// Write one code per row of a CSV file (or per line of a text file)
+    /// into a directory.
+    Batch(BatchArgs),
     /// Print a shell completion script to stdout.
     Completions {
         /// The shell to generate completions for.
@@ -318,6 +324,90 @@ pub struct DecodeArgs {
     /// terminal, where the data could send escape sequences.
     #[arg(long)]
     pub raw: bool,
+}
+
+const BATCH_AFTER_HELP: &str = "\
+Input: a CSV file whose first row is a header when one of its cells is
+'data' (that column is encoded; a 'filename' column names the files), or
+without a header, data in the first column and a file name in the second.
+With --lines, every non-blank line is one code. At most 50 MiB and
+100000 rows; a UTF-8 byte order mark is ignored.
+
+File names: --name is a template [default: {filename} when there is a
+filename column, otherwise {n}] with the fields {n} (row number; {n:04}
+pads it), {hash} (16 hex digits of the data), {data}, {filename} and,
+with a header, any column by name. Field values lose path separators,
+':', control characters and leading '.' or '-'; Windows device names
+(CON, NUL, COM1, ...) are refused; names are cut at 200 bytes and get
+the format's extension. Every file stays directly inside --out-dir.
+
+Existing files are never replaced without --force. A row that fails is
+reported and the rest are still written, unless --fail-fast; the exit
+status is then that of the first failed row.
+
+Examples:
+  qr batch urls.csv --out-dir codes
+                               One PNG per row, named from the CSV
+  qr batch urls.txt --lines --out-dir codes --name 'url-{n:04}' -f svg
+                               One SVG per line: url-0001.svg, ...
+  qr batch rows.csv --out-dir out --json > report.ndjson
+                               One JSON object per row, then a summary";
+
+/// Options for `qr batch`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(after_help = BATCH_AFTER_HELP)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
+pub struct BatchArgs {
+    /// CSV file to read, or with --lines a text file; '-' reads stdin.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// Directory to write the codes in (created if it does not exist).
+    #[arg(long, value_name = "DIR")]
+    pub out_dir: PathBuf,
+
+    /// Read one item per line instead of CSV (blank lines are skipped).
+    #[arg(long, conflicts_with = "no_header")]
+    pub lines: bool,
+
+    /// The CSV has no header: the first row is data even if a cell says
+    /// 'data'.
+    #[arg(long)]
+    pub no_header: bool,
+
+    /// File name template, without the extension (see below).
+    #[arg(long, value_name = "TEMPLATE")]
+    pub name: Option<String>,
+
+    /// Output format [default: png]; text and ascii write .txt files.
+    #[arg(short = 'f', long = "format", value_enum, value_name = "FORMAT")]
+    pub format: Option<OutputFormat>,
+
+    /// How each code is encoded and drawn.
+    #[command(flatten)]
+    pub style: StyleArgs,
+
+    /// Worker threads [default: the number of CPUs].
+    #[arg(
+        short = 'j',
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u16).range(1..=i64::from(crate::batch::MAX_JOBS))
+    )]
+    pub jobs: Option<u16>,
+
+    /// Stop at the first row that fails (rows already started finish).
+    #[arg(long)]
+    pub fail_fast: bool,
+
+    /// Replace files that already exist in --out-dir.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print one JSON object per row and then a summary on stdout (NDJSON),
+    /// and JSON errors on stderr.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Options shared by every command.
@@ -536,6 +626,84 @@ mod tests {
         let cli = Cli::try_parse_from(["qr", "--", "decode"]).unwrap();
         assert_eq!(cli.generate.text.as_deref(), Some("decode"));
         assert!(!cli.json());
+    }
+
+    #[test]
+    fn batch_takes_a_file_a_directory_and_the_style_flags() {
+        let cli = Cli::try_parse_from([
+            "qr",
+            "batch",
+            "rows.csv",
+            "--out-dir",
+            "out",
+            "--name",
+            "{n:04}",
+            "-f",
+            "svg",
+            "-j",
+            "3",
+            "--fail-fast",
+            "--force",
+            "--json",
+            "--shape",
+            "dots",
+            "--ec",
+            "H",
+        ])
+        .unwrap();
+        let Some(Command::Batch(batch)) = &cli.command else {
+            panic!("expected batch: {:?}", cli.command);
+        };
+        assert_eq!(batch.file, PathBuf::from("rows.csv"));
+        assert_eq!(batch.out_dir, PathBuf::from("out"));
+        assert_eq!(batch.name.as_deref(), Some("{n:04}"));
+        assert_eq!(batch.format, Some(OutputFormat::Svg));
+        assert_eq!(batch.jobs, Some(3));
+        assert!(batch.fail_fast && batch.force && batch.json && cli.json());
+        assert!(!(batch.lines || batch.no_header));
+        assert_eq!(
+            (batch.style.shape, batch.style.ec_level),
+            (Shape::Dots, Some(EcLevel::H))
+        );
+        // --out-dir is required; --lines and --no-header do not mix; the
+        // one-code output flags do not exist here.
+        for (args, kind) in [
+            (
+                &["qr", "batch", "f"][..],
+                clap::error::ErrorKind::MissingRequiredArgument,
+            ),
+            (
+                &[
+                    "qr",
+                    "batch",
+                    "f",
+                    "--out-dir",
+                    "o",
+                    "--lines",
+                    "--no-header",
+                ],
+                clap::error::ErrorKind::ArgumentConflict,
+            ),
+            (
+                &["qr", "batch", "f", "--out-dir", "o", "-o", "x.png"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["qr", "batch", "f", "--out-dir", "o", "--data-uri"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["qr", "batch", "f", "--out-dir", "o", "--jobs", "0"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                &["qr", "batch", "f", "--out-dir", "o", "--jobs", "257"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+        ] {
+            let err = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(err.kind(), kind, "{args:?}");
+        }
     }
 
     #[test]

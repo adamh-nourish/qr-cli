@@ -97,6 +97,22 @@ impl OutputFormat {
         }
     }
 
+    /// The extension (without the dot) of a file holding this format, as
+    /// `qr batch` names them; `None` for `terminal`, which is not written
+    /// to files.
+    pub const fn extension(self) -> Option<&'static str> {
+        match self {
+            Self::Png => Some("png"),
+            Self::Svg => Some("svg"),
+            Self::Jpeg => Some("jpg"),
+            Self::Webp => Some("webp"),
+            Self::Pdf => Some("pdf"),
+            Self::Eps => Some("eps"),
+            Self::Text | Self::Ascii => Some("txt"),
+            Self::Terminal => None,
+        }
+    }
+
     /// The format a file extension names, ignoring ASCII case.
     pub fn from_extension(extension: &str) -> Option<Self> {
         EXTENSIONS
@@ -154,6 +170,19 @@ mod tests {
             known_extensions(),
             ".png, .svg, .jpg, .jpeg, .webp, .pdf, .eps, .txt"
         );
+    }
+
+    #[test]
+    fn file_extensions_name_a_format_drawn_the_same_way() {
+        for format in OutputFormat::value_variants() {
+            match format.extension() {
+                Some(ext) => {
+                    let back = OutputFormat::from_extension(ext).unwrap();
+                    assert_eq!(back.renderer(), format.renderer(), "{format:?}");
+                }
+                None => assert_eq!(*format, OutputFormat::Terminal),
+            }
+        }
     }
 
     #[test]

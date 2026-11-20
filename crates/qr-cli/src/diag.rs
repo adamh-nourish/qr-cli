@@ -70,6 +70,23 @@ const HINT: Style = Style::new()
     .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Cyan)));
 const NOTE: Style = Style::new().bold();
 
+/// How a [`Reporter`] writes: colour, verbosity and JSON. It is `Copy` and
+/// `Send`, so worker threads can each build a reporter over their own
+/// buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReporterSettings {
+    color: bool,
+    verbosity: Verbosity,
+    json: bool,
+}
+
+impl ReporterSettings {
+    /// A reporter with these settings writing to `sink`.
+    pub fn reporter(self, sink: &mut dyn Write) -> Reporter<'_> {
+        Reporter::new(sink, self.color, self.verbosity).with_json(self.json)
+    }
+}
+
 /// Writes diagnostics to stderr.
 ///
 /// Writing is best effort: if stderr itself is broken there is nowhere left
@@ -97,6 +114,23 @@ impl<'a> Reporter<'a> {
     pub fn with_json(mut self, json: bool) -> Self {
         self.json = json;
         self
+    }
+
+    /// The settings this reporter writes with, to build another reporter
+    /// that writes the same way (for example into a buffer on a worker
+    /// thread, forwarded later with [`forward`](Self::forward)).
+    pub fn settings(&self) -> ReporterSettings {
+        ReporterSettings {
+            color: self.color,
+            verbosity: self.verbosity,
+            json: self.json,
+        }
+    }
+
+    /// Writes diagnostics another reporter with the same
+    /// [`settings`](Self::settings) produced, unchanged.
+    pub fn forward(&mut self, diagnostics: &[u8]) {
+        let _ = self.stderr.write_all(diagnostics);
     }
 
     /// Reports an error, always. `code` is the stable name `--json` shows.
@@ -236,6 +270,23 @@ mod tests {
         assert_eq!(
             lines[0]["error"]["message"],
             "bad \x1b[2J \u{202e}thing\u{9b}"
+        );
+    }
+
+    #[test]
+    fn settings_build_a_reporter_that_writes_the_same_way() {
+        let mut buffered = Vec::new();
+        let mut direct = Vec::new();
+        let mut main = Reporter::new(&mut direct, false, Verbosity::Quiet).with_json(true);
+        let settings = main.settings();
+        let mut worker = settings.reporter(&mut buffered);
+        worker.warn("hidden", "quiet hides this", None);
+        worker.error("shown", "an error", None);
+        assert_eq!(worker.settings(), settings);
+        main.forward(&buffered);
+        assert_eq!(
+            String::from_utf8(direct).unwrap(),
+            "{\"error\":{\"code\":\"shown\",\"message\":\"an error\"}}\n"
         );
     }
 
