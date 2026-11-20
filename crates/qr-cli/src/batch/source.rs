@@ -3,9 +3,11 @@
 //!
 //! The whole input is read first (at most [`MAX_INPUT_BYTES`]), and every
 //! row is counted before anything is written, so a file over
-//! [`MAX_ROWS`] rows, or one with no rows, is refused up front. Rows are
-//! then produced one at a time from the buffer, so memory beyond the input
-//! itself does not grow with the row count.
+//! [`MAX_ROWS`] rows, a row over [`MAX_COLUMNS`] cells, or a file with no
+//! rows, is refused up front. Rows are then produced one at a time from
+//! the buffer, and each keeps only the cells the batch uses (the data and
+//! the columns `--name` refers to), so memory beyond the input itself stays
+//! within a small multiple of it however the rows are shaped.
 //!
 //! Two layouts are read:
 //!
@@ -37,6 +39,11 @@ pub const MAX_ROWS: usize = 100_000;
 /// The largest batch input, in bytes (DECISIONS section 4.7).
 pub const MAX_INPUT_BYTES: u64 = 50 * 1024 * 1024;
 
+/// The most cells one CSV row may have (DECISIONS section 4.7). Checked
+/// before any row is parsed, so a row of millions of empty cells never
+/// reaches the parser's per-cell bookkeeping.
+pub const MAX_COLUMNS: usize = 1000;
+
 /// The UTF-8 byte order mark some editors write at the start of a file.
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
@@ -62,6 +69,12 @@ pub enum TableError {
     /// More than [`MAX_ROWS`] rows.
     #[error("has more than {MAX_ROWS} rows, the most one batch encodes")]
     TooManyRows,
+    /// A row with more than [`MAX_COLUMNS`] cells.
+    #[error("has more than {MAX_COLUMNS} columns on line {line}")]
+    TooManyColumns {
+        /// The line the row starts on.
+        line: u64,
+    },
     /// The CSV could not be parsed.
     #[error("is not valid CSV (line {line}): {message}")]
     Csv {
@@ -77,9 +90,8 @@ pub enum TableError {
 ///
 /// # Errors
 ///
-/// [`CliError::StdinIsTerminal`] for `-` on a terminal, and a
-/// [`BatchError`](super::BatchError) for a read failure or an input that
-/// is too large.
+/// A [`BatchError`](super::BatchError) for `-` on a terminal, a read
+/// failure or an input that is too large.
 pub(crate) fn read(
     path: &Path,
     stdin: &mut dyn Read,
@@ -96,7 +108,7 @@ pub(crate) fn read(
     if path.as_os_str() == "-" {
         let origin = InputSource::Stdin;
         if stdin_is_tty {
-            return Err(CliError::StdinIsTerminal);
+            return Err(super::BatchError::StdinIsTerminal.into());
         }
         let bytes = read_limited(stdin).map_err(|e| read_error(&origin, e))?;
         return match bytes {
@@ -193,28 +205,73 @@ impl Schema {
     }
 }
 
-/// One row to encode.
+/// One row to encode, holding only the cells the batch uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Row {
     /// The row number, from 1, not counting a header or blank lines.
     pub(crate) n: usize,
     /// The input line the row starts on, from 1.
     pub(crate) line: u64,
-    /// The cells (one for `--lines`).
-    fields: Vec<Vec<u8>>,
-    /// Which cell is the data.
+    /// The kept cells, one after another.
+    bytes: Vec<u8>,
+    /// Each kept cell's column and where it ends in `bytes`, in column
+    /// order.
+    cells: Vec<(usize, usize)>,
+    /// Which column is the data.
     data: usize,
 }
 
 impl Row {
+    /// Keeps the cells of `fields` whose columns are in `keep` (sorted).
+    fn new<'f>(
+        n: usize,
+        line: u64,
+        data: usize,
+        keep: &[usize],
+        fields: impl Iterator<Item = &'f [u8]>,
+    ) -> Self {
+        let mut bytes = Vec::new();
+        let mut cells = Vec::with_capacity(keep.len());
+        let mut wanted = keep.iter().copied().peekable();
+        for (index, field) in fields.enumerate() {
+            let Some(&next) = wanted.peek() else { break };
+            if index == next {
+                wanted.next();
+                bytes.extend_from_slice(field);
+                cells.push((index, bytes.len()));
+            }
+        }
+        Self {
+            n,
+            line,
+            bytes,
+            cells,
+            data,
+        }
+    }
+
     /// The bytes to encode (empty if the row has no such cell).
     pub(crate) fn data(&self) -> &[u8] {
         self.field(self.data)
     }
 
-    /// Cell `index`, or nothing if this row is shorter.
+    /// Cell `index`, or nothing if this row is shorter or the cell was not
+    /// kept.
     pub(crate) fn field(&self, index: usize) -> &[u8] {
-        self.fields.get(index).map_or(&[], Vec::as_slice)
+        let Ok(i) = self
+            .cells
+            .binary_search_by_key(&index, |&(column, _)| column)
+        else {
+            return &[];
+        };
+        let start = i.checked_sub(1).map_or(0, |prev| self.cells[prev].1);
+        &self.bytes[start..self.cells[i].1]
+    }
+
+    /// The heap bytes this row holds.
+    #[cfg(test)]
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.bytes.capacity() + self.cells.capacity() * size_of::<(usize, usize)>()
     }
 }
 
@@ -226,6 +283,8 @@ pub(crate) struct Table<'a> {
     schema: Schema,
     header: bool,
     len: usize,
+    /// The columns each row keeps, sorted.
+    keep: Vec<usize>,
 }
 
 impl<'a> Table<'a> {
@@ -233,13 +292,14 @@ impl<'a> Table<'a> {
     ///
     /// # Errors
     ///
-    /// [`TableError::NoRows`], [`TableError::TooManyRows`] or
-    /// [`TableError::Csv`].
+    /// [`TableError::NoRows`], [`TableError::TooManyRows`],
+    /// [`TableError::TooManyColumns`] or [`TableError::Csv`].
     pub(crate) fn parse(bytes: &'a [u8], layout: Layout) -> Result<Self, TableError> {
         let bytes = bytes.strip_prefix(BOM).unwrap_or(bytes);
         let (schema, header) = match layout {
             Layout::Lines => (Schema::positional(1), false),
             Layout::Csv { detect_header } => {
+                check_columns(bytes)?;
                 let mut reader = csv_reader(bytes);
                 let mut first = ByteRecord::new();
                 if !reader
@@ -254,12 +314,14 @@ impl<'a> Table<'a> {
                 }
             }
         };
+        let keep = vec![schema.data];
         let mut table = Self {
             bytes,
             layout,
             schema,
             header,
             len: 0,
+            keep,
         };
         let mut rows = table.rows();
         let mut len = 0;
@@ -284,6 +346,14 @@ impl<'a> Table<'a> {
     /// The number of rows.
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Makes each row keep `columns` as well as the data; every other cell
+    /// is dropped as the row is read.
+    pub(crate) fn keep(&mut self, columns: impl IntoIterator<Item = usize>) {
+        self.keep.extend(columns);
+        self.keep.sort_unstable();
+        self.keep.dedup();
     }
 
     /// The rows, in order.
@@ -313,6 +383,48 @@ impl<'a> Table<'a> {
             inner,
             n: 0,
             data: self.schema.data,
+            keep: self.keep.clone(),
+        }
+    }
+}
+
+/// Refuses a CSV with a row of more than [`MAX_COLUMNS`] cells, counting
+/// them with the same parser settings as [`csv_reader`] but without
+/// storing anything per cell.
+fn check_columns(bytes: &[u8]) -> Result<(), TableError> {
+    use csv_core::ReadRecordResult;
+
+    let mut reader = csv_core::Reader::new();
+    let mut output = [0; 4096];
+    let mut ends = [0; MAX_COLUMNS];
+    let mut input = bytes;
+    let mut cells = 0;
+    // Where the current row's text starts.
+    let mut start = 0;
+    loop {
+        let (result, read, _, ended) = reader.read_record(input, &mut output, &mut ends[cells..]);
+        input = &input[read..];
+        cells += ended;
+        match result {
+            // The cell contents are not needed: reuse the buffer. An empty
+            // input tells the parser the data is over.
+            ReadRecordResult::InputEmpty | ReadRecordResult::OutputFull => {}
+            ReadRecordResult::OutputEndsFull => {
+                // Blank lines before the row are not part of it.
+                let skipped = bytes[start..]
+                    .iter()
+                    .take_while(|&&b| matches!(b, b'\r' | b'\n'));
+                let start = start + skipped.count();
+                let newlines = bytes[..start].iter().filter(|&&b| b == b'\n');
+                return Err(TableError::TooManyColumns {
+                    line: newlines.count() as u64 + 1,
+                });
+            }
+            ReadRecordResult::Record => {
+                cells = 0;
+                start = bytes.len() - input.len();
+            }
+            ReadRecordResult::End => return Ok(()),
         }
     }
 }
@@ -338,6 +450,8 @@ pub(crate) struct Rows<'a> {
     inner: Inner<'a>,
     n: usize,
     data: usize,
+    /// The columns each row keeps, sorted.
+    keep: Vec<usize>,
 }
 
 enum Inner<'a> {
@@ -374,7 +488,9 @@ impl Rows<'_> {
                 *line += 1;
                 let text = text.strip_suffix(b"\r").unwrap_or(text);
                 if !text.is_empty() {
-                    break Some((*line, vec![text.to_vec()]));
+                    self.n += 1;
+                    let fields = std::iter::once(text);
+                    break Some(Row::new(self.n, *line, self.data, &self.keep, fields));
                 }
             },
             Inner::Csv {
@@ -398,21 +514,15 @@ impl Rows<'_> {
                     let skipped = bytes[*counted..start].iter().filter(|&&b| b == b'\n');
                     *newlines += skipped.count() as u64;
                     *counted = start;
-                    Some((*newlines + 1, record.iter().map(<[u8]>::to_vec).collect()))
+                    self.n += 1;
+                    let line = *newlines + 1;
+                    Some(Row::new(self.n, line, self.data, &self.keep, record.iter()))
                 } else {
                     None
                 }
             }
         };
-        Ok(next.map(|(line, fields)| {
-            self.n += 1;
-            Row {
-                n: self.n,
-                line,
-                fields,
-                data: self.data,
-            }
-        }))
+        Ok(next)
     }
 }
 
@@ -466,7 +576,8 @@ mod tests {
 
     #[test]
     fn csv_header_is_detected_by_a_data_column() {
-        let table = Table::parse(b"Filename, DATA \nf1,d1\n\nf2,d2\n", CSV).unwrap();
+        let mut table = Table::parse(b"Filename, DATA \nf1,d1\n\nf2,d2\n", CSV).unwrap();
+        table.keep([0]);
         assert_eq!(table.schema().filename(), Some(0));
         assert_eq!(table.schema().column("data"), Some(1));
         let got: Vec<_> = table.rows().map(Result::unwrap).collect();
@@ -479,8 +590,9 @@ mod tests {
 
     #[test]
     fn without_a_data_column_the_first_row_is_data() {
-        let table = Table::parse(b"hello,world.png\nbye\n", CSV).unwrap();
+        let mut table = Table::parse(b"hello,world.png\nbye\n", CSV).unwrap();
         assert_eq!(table.schema().filename(), Some(1));
+        table.keep([1]);
         let got: Vec<_> = table.rows().map(Result::unwrap).collect();
         assert_eq!(got[0].data(), b"hello");
         assert_eq!(got[0].field(1), b"world.png");
@@ -543,6 +655,70 @@ mod tests {
     }
 
     #[test]
+    fn rows_keep_only_the_cells_the_batch_uses() {
+        // 1,000 rows of 999 empty cells and one 'x': kept whole, as
+        // Vec<Vec<u8>>, each row took over 24 KB.
+        let mut csv = b"data".to_vec();
+        csv.extend(b",a".repeat(MAX_COLUMNS - 1));
+        csv.push(b'\n');
+        let mut row = b"x".to_vec();
+        row.extend(b",".repeat(MAX_COLUMNS - 1));
+        row.push(b'\n');
+        csv.extend(row.repeat(1000));
+        let table = Table::parse(&csv, CSV).unwrap();
+        assert_eq!(table.len(), 1000);
+        for row in table.rows() {
+            let row = row.unwrap();
+            assert_eq!(row.data(), b"x");
+            assert!(row.heap_bytes() <= 64, "{}", row.heap_bytes());
+        }
+        // Columns asked for are kept as well; the rest read as empty.
+        let mut table = Table::parse(
+            b"data,a,b,c
+d,1,2,3
+",
+            CSV,
+        )
+        .unwrap();
+        table.keep([3, 1]);
+        let row = table.rows().next().unwrap().unwrap();
+        assert_eq!(
+            (row.data(), row.field(1), row.field(2), row.field(3)),
+            (&b"d"[..], &b"1"[..], &b""[..], &b"3"[..])
+        );
+        assert_eq!(row.field(9), b"");
+    }
+
+    #[test]
+    fn rows_over_the_column_limit_are_refused_up_front() {
+        let row = |cells: usize| {
+            let mut row = b"x".to_vec();
+            row.extend(b",y".repeat(cells - 1));
+            row.push(b'\n');
+            row
+        };
+        let mut ok = row(MAX_COLUMNS);
+        ok.extend(row(MAX_COLUMNS));
+        assert_eq!(Table::parse(&ok, CSV).unwrap().len(), 2);
+        // Quoted commas are not cell breaks.
+        let mut quoted = row(MAX_COLUMNS);
+        quoted.splice(0..1, b"\"a,b,c\"".iter().copied());
+        assert_eq!(Table::parse(&quoted, CSV).unwrap().len(), 1);
+
+        let mut over = b"data\n\nfirst\n".to_vec();
+        over.extend(row(MAX_COLUMNS + 1));
+        let err = Table::parse(&over, CSV).unwrap_err();
+        assert_eq!(err, TableError::TooManyColumns { line: 4 });
+        assert_eq!(err.to_string(), "has more than 1000 columns on line 4");
+        // One huge row of empty cells, as in a 50 MiB file of commas.
+        let commas = vec![b','; 1 << 20];
+        let err = Table::parse(&commas, NO_HEADER).unwrap_err();
+        assert_eq!(err, TableError::TooManyColumns { line: 1 });
+        // --lines has no columns.
+        assert_eq!(Table::parse(&commas, Layout::Lines).unwrap().len(), 1);
+    }
+
+    #[test]
     fn reads_are_bounded() {
         let big = vec![b'x'; usize::try_from(MAX_INPUT_BYTES).unwrap() + 1];
         let err = read(Path::new("-"), &mut big.as_slice(), false).unwrap_err();
@@ -554,7 +730,10 @@ mod tests {
         let (origin, bytes) = read(Path::new("-"), &mut &exact[..], false).unwrap();
         assert_eq!((origin, bytes.len()), (InputSource::Stdin, exact.len()));
         let err = read(Path::new("-"), &mut &b""[..], true).unwrap_err();
-        assert!(matches!(err, CliError::StdinIsTerminal));
+        assert!(matches!(
+            err,
+            CliError::Batch(super::super::BatchError::StdinIsTerminal)
+        ));
         let err = read(Path::new("-"), &mut FailingReader, false).unwrap_err();
         assert!(matches!(
             err,

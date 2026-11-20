@@ -35,7 +35,7 @@ pub(crate) fn default_jobs() -> usize {
 ///
 /// [`BatchError::Pool`] if the threads cannot be started.
 pub(crate) fn build(jobs: usize) -> Result<ThreadPool, BatchError> {
-    ThreadPoolBuilder::new()
+    let pool = ThreadPoolBuilder::new()
         .num_threads(jobs)
         .thread_name(|i| format!("qr-batch-{i}"))
         .start_handler(|_| {
@@ -45,7 +45,12 @@ pub(crate) fn build(jobs: usize) -> Result<ThreadPool, BatchError> {
         .map_err(|e| BatchError::Pool {
             jobs,
             message: e.to_string(),
-        })
+        })?;
+    // `build` can return before every worker has run its start handler
+    // (rayon-core marks a worker ready first), so the count could lag.
+    // A job on every worker runs only once all of them have started.
+    pool.broadcast(|_| {});
+    Ok(pool)
 }
 
 #[cfg(test)]
@@ -63,6 +68,7 @@ mod tests {
             names.iter().all(|n| n.starts_with("qr-batch-")),
             "{names:?}"
         );
+        // Every worker has started by the time `build` returns.
         assert!(threads_started() >= before + 3);
         assert!(default_jobs() >= 1);
     }

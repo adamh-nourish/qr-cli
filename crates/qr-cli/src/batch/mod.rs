@@ -5,14 +5,14 @@
 //!
 //! 1. **Checks, before anything is written.** The format, logo and style
 //!    warnings are settled once; the input is read within its limits
-//!    ([`source`]), every row is counted, `--name` is parsed against the
-//!    input's columns ([`template`]) and `--out-dir` is created and
-//!    canonicalised ([`name::OutDir`]). Any problem here stops the batch.
+//!    (`source`), every row is counted, `--name` is parsed against the
+//!    input's columns (`template`) and `--out-dir` is created and
+//!    canonicalised (`name::OutDir`). Any problem here stops the batch.
 //! 2. **Chunks of [`CHUNK`] rows.** Each row's file name is built and
 //!    checked on the main thread, in order, so duplicates are found
-//!    deterministically ([`name`]). The rows are then encoded, rendered,
+//!    deterministically (`name`). The rows are then encoded, rendered,
 //!    verified and written in parallel on a local rayon pool
-//!    ([`pool`]), each with its diagnostics buffered.
+//!    (`pool`), each with its diagnostics buffered.
 //! 3. **Ordered reporting.** Results are reported in row order whatever
 //!    order they finished in: buffered diagnostics, an error per failed
 //!    row and, with `--json`, one NDJSON line per row, then a summary.
@@ -36,7 +36,7 @@ mod pool;
 mod source;
 mod template;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,13 +46,14 @@ use qr_core::{
     render_text, render_vector,
 };
 use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
+use unicode_normalization::UnicodeNormalization as _;
 
 pub use self::error::BatchError;
 pub use self::name::NameError;
 use self::name::{OutDir, Target, file_name};
 pub use self::pool::{MAX_JOBS, threads_started};
 use self::source::{Layout, Row, Table};
-pub use self::source::{MAX_INPUT_BYTES, MAX_ROWS, TableError};
+pub use self::source::{MAX_COLUMNS, MAX_INPUT_BYTES, MAX_ROWS, TableError};
 pub use self::template::TemplateError;
 use self::template::{Template, fnv1a};
 use crate::cli::{BatchArgs, OutputFormat, StyleArgs};
@@ -118,12 +119,15 @@ impl Batch<'_, '_> {
             let origin = origin.clone();
             move |error| BatchError::Table { origin, error }
         };
-        let table = Table::parse(&bytes, layout).map_err(table_error(&origin))?;
+        let mut table = Table::parse(&bytes, layout).map_err(table_error(&origin))?;
         let name = args
             .name
             .as_deref()
             .unwrap_or_else(|| Template::default_for(table.schema()));
         let template = Template::parse(name, table.schema()).map_err(BatchError::from)?;
+        // Rows hold only the cells they use, so memory follows what the
+        // batch reads, not how many cells the input has.
+        table.keep(template.columns());
         let out_dir = OutDir::open(&args.out_dir).map_err(|error| BatchError::OutDir {
             path: args.out_dir.clone(),
             error,
@@ -175,7 +179,7 @@ struct Namer<'a> {
     template: &'a Template,
     extension: &'static str,
     out_dir: &'a OutDir,
-    /// Hashes of the lower-cased names used so far, with their rows.
+    /// Hashes of the [`name_key`]s used so far, with their rows.
     /// Hashes keep this small at 100k rows; a false clash would need a
     /// 64-bit collision.
     seen: HashMap<u64, usize>,
@@ -204,7 +208,7 @@ impl Namer<'_> {
         let name =
             file_name(&self.template.render(row), self.extension).map_err(BatchError::from)?;
         let target = self.out_dir.resolve(&name).map_err(BatchError::from)?;
-        let key = fnv1a(name.to_lowercase().as_bytes());
+        let key = fnv1a(name_key(&name).as_bytes());
         if let Some(&first) = self.seen.get(&key) {
             return Err(BatchError::DuplicateName {
                 path: target.shown,
@@ -215,6 +219,18 @@ impl Namer<'_> {
         self.seen.insert(key, row.n);
         Ok(target)
     }
+}
+
+/// The form of `name` that two names share when a file system may store
+/// them as one file: NFC (APFS and HFS+ do not tell NFC from NFD), then
+/// lower case (macOS and Windows ignore case), then NFC again, since
+/// lowering can undo it.
+fn name_key(name: &str) -> String {
+    if name.is_ascii() {
+        return name.to_ascii_lowercase();
+    }
+    let lower = name.nfc().collect::<String>().to_lowercase();
+    lower.nfc().collect()
 }
 
 /// How every row is drawn: settled once, shared by the workers.
@@ -418,6 +434,9 @@ struct Tally {
     failed: usize,
     /// The exit status of the first row that failed.
     first_failure: Option<ExitStatus>,
+    /// The error codes whose hint has been given: each is given once, not
+    /// after every row that fails the same way.
+    hinted: HashSet<&'static str>,
 }
 
 impl Tally {
@@ -460,7 +479,8 @@ impl Tally {
                 self.failed += 1;
                 self.first_failure.get_or_insert(error.exit_status());
                 let message = format!("row {} (line {}): {error}", row.n, row.line);
-                reporter.error(error.code(), &message, error.hint().as_deref());
+                let hint = error.hint().filter(|_| self.hinted.insert(error.code()));
+                reporter.error(error.code(), &message, hint.as_deref());
                 BatchRow {
                     row: row.n,
                     line: row.line,

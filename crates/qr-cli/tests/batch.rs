@@ -264,13 +264,38 @@ fn written_codes_decode_back_to_their_rows() {
     }
 }
 
+/// `qr batch --help`, pinned. clap turns a literal `{n}` in help text into
+/// a newline, so the text must never contain one.
+#[test]
+fn batch_help_is_stable() {
+    let output = qr()
+        .args(["batch", "--help"])
+        .env("COLUMNS", "100")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    insta::assert_snapshot!("batch_help", help);
+    let short = qr()
+        .args(["batch", "-h"])
+        .env("COLUMNS", "100")
+        .output()
+        .unwrap();
+    let short = String::from_utf8(short.stdout).unwrap();
+    for text in [&help, &short] {
+        assert!(text.contains("{n:04} (the"), "{text}");
+        assert!(!text.contains("otherwise \n"), "{text}");
+        assert!(!text.contains("terminal:"), "{text}");
+    }
+}
+
 #[test]
 fn help_describes_templates_and_limits() {
     qr().args(["batch", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("{n:04}"))
-        .stdout(predicate::str::contains("100000 rows"))
+        .stdout(predicate::str::contains("1000 cells per row"))
         .stdout(predicate::str::contains("--fail-fast"))
         .stdout(predicate::str::contains("--shape"));
 }

@@ -133,6 +133,14 @@ impl Template {
         Ok(Self { parts })
     }
 
+    /// The columns the template reads.
+    pub(crate) fn columns(&self) -> impl Iterator<Item = usize> + '_ {
+        self.parts.iter().filter_map(|part| match part {
+            Part::Column(index) => Some(*index),
+            Part::Literal(_) | Part::Number { .. } | Part::Hash => None,
+        })
+    }
+
     /// The file name stem for `row`, before the extension is added.
     pub(crate) fn render(&self, row: &Row) -> String {
         let mut out = String::new();
@@ -220,8 +228,9 @@ mod tests {
     }
 
     fn names(text: &str, csv: &str, layout: Layout) -> Result<Vec<String>, TemplateError> {
-        let table = table(csv, layout);
+        let mut table = table(csv, layout);
         let template = Template::parse(text, table.schema())?;
+        table.keep(template.columns());
         Ok(table
             .rows()
             .map(|row| template.render(&row.unwrap()))

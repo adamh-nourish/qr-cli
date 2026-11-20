@@ -28,6 +28,10 @@ serde_json.workspace = true
 # `qr batch` only: the one-shot path never starts a thread pool.
 rayon.workspace = true
 csv.workspace = true
+# Counts each CSV row's cells before any row is parsed (DECISIONS 4.7).
+csv-core.workspace = true
+# NFC, so batch names that one file system stores as the same file clash.
+unicode-normalization.workspace = true
 
 # O_NONBLOCK, so opening an image or logo path never blocks on a FIFO.
 [target.'cfg(unix)'.dependencies]

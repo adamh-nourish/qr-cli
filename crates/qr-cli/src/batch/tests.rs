@@ -180,13 +180,18 @@ fn text_formats_write_txt_files_and_terminal_is_refused() {
     );
     assert!(o.err.contains("below the 4-module quiet zone") || !o.err.contains("margin"));
 
+    // clap refuses it, and the batch help does not offer it.
     let o = f.run(&["-f", "terminal"]);
     assert_eq!(o.status, ExitStatus::Usage);
-    assert_eq!(
-        o.err,
-        "error: qr batch writes files, and terminal output is not a file format\n  \
-         hint: use -f png, svg, text or another file format\n"
+    assert!(
+        o.err
+            .contains("invalid value 'terminal' for '--format <FORMAT>'"),
+        "{}",
+        o.err
     );
+    assert!(!o.err.contains("[possible values: terminal"), "{}", o.err);
+    let o = f.run(&["-f", "jpg", "--force"]);
+    assert_eq!(o.status, ExitStatus::Success, "{}", o.err);
 }
 
 #[test]
@@ -472,4 +477,150 @@ fn csv_columns_feed_the_template() {
     assert_eq!(written[0].len(), "eng-7-".len() + 16 + ".png".len());
     let p = PathBuf::from(f.out());
     assert!(p.join(&written[0]).is_file());
+}
+
+/// `e` with an acute accent, composed (NFC) and decomposed (NFD).
+const E_NFC: &str = "\u{e9}";
+const E_NFD: &str = "e\u{301}";
+
+#[test]
+fn names_that_differ_only_in_normalization_clash() {
+    // APFS and HFS+ store both spellings as one file, so the second row
+    // must fail, the same way every time, with or without --force.
+    let rows = format!(
+        "data,filename\none,{E_NFC}\ntwo,{E_NFD}\nthree,{}\n",
+        "\u{c9}"
+    );
+    let f = Fixture::new(&rows);
+    for extra in [&[][..], &["--force"][..]] {
+        let mut args = vec!["-f", "svg", "--json"];
+        args.extend_from_slice(extra);
+        let o = f.run(&args);
+        assert_eq!(o.status, ExitStatus::Usage, "{extra:?}: {}", o.err);
+        let lines = json_lines(&o.out);
+        assert_eq!(lines[0]["error"], Value::Null, "{extra:?}");
+        for row in [1, 2] {
+            assert_eq!(lines[row]["error"]["code"], "duplicate_name", "{extra:?}");
+            let message = lines[row]["error"]["message"].as_str().unwrap();
+            assert!(message.ends_with("is also the file of row 1"), "{message}");
+        }
+        assert_eq!(
+            lines[3]["summary"],
+            serde_json::json!({"rows": 3, "written": 1, "failed": 2, "skipped": 0})
+        );
+        assert_eq!(f.written().len(), 1, "{extra:?}");
+        // The one file written holds row 1.
+        let svg = fs::read(f.dir.path().join("out").join(&f.written()[0])).unwrap();
+        assert!(svg.starts_with(b"<?xml") || svg.starts_with(b"<svg"));
+    }
+}
+
+#[test]
+fn name_keys_fold_case_and_normalization() {
+    use super::name_key;
+    assert_eq!(name_key("A.PNG"), "a.png");
+    assert_eq!(name_key(E_NFD), E_NFC);
+    assert_eq!(name_key("\u{c9}"), E_NFC);
+    assert_eq!(name_key("E\u{301}.png"), format!("{E_NFC}.png"));
+    assert_ne!(name_key("\u{e8}"), name_key(E_NFC));
+}
+
+#[test]
+fn stdin_on_a_terminal_names_the_batch_remedy() {
+    let mut stdin: &[u8] = b"";
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let status = run(
+        ["qr", "batch", "-", "--out-dir", "unused"],
+        &mut Context {
+            stdin: &mut stdin,
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+            env: Env {
+                stdin_is_tty: true,
+                ..Env::default()
+            },
+        },
+    );
+    assert_eq!(status, ExitStatus::Usage);
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        "error: no input: stdin is a terminal\n  \
+         hint: pipe the CSV in (... | qr batch - --out-dir DIR) or pass a FILE\n"
+    );
+    assert!(!Path::new("unused").exists());
+}
+
+#[test]
+fn each_hint_is_given_once_per_batch() {
+    let f = Fixture::new("a\nb\nc\n");
+    fs::create_dir(f.out()).unwrap();
+    for name in ["1.png", "2.png", "3.png"] {
+        fs::write(f.dir.path().join("out").join(name), b"keep").unwrap();
+    }
+    let o = f.run(&["-j", "1"]);
+    assert_eq!(o.status, ExitStatus::Io);
+    assert_eq!(o.err.matches("already exists").count(), 3, "{}", o.err);
+    assert_eq!(o.err.matches("hint: pass --force").count(), 1, "{}", o.err);
+}
+
+#[test]
+fn an_out_dir_that_is_a_file_is_not_a_directory() {
+    let f = Fixture::new("a\n");
+    let o = batch(&[&f.input(), "--out-dir", &f.input()], b"");
+    assert_eq!(o.status, ExitStatus::Io);
+    assert!(
+        o.err.starts_with(&format!(
+            "error: cannot use output directory '{}': it is not a directory\n",
+            f.input()
+        )),
+        "{}",
+        o.err
+    );
+    assert!(!o.err.contains("os error"), "{}", o.err);
+}
+
+#[test]
+fn rows_over_several_chunks_are_reported_in_order() {
+    let rows = super::CHUNK * 2 + 7;
+    let mut input = String::new();
+    for i in 1..=rows {
+        writeln!(input, "row {i}").unwrap();
+    }
+    let f = Fixture::new(&input);
+    let o = f.run(&["--lines", "-f", "text", "--json", "-j", "4"]);
+    assert_eq!(o.status, ExitStatus::Success, "{}", o.err);
+    let lines = json_lines(&o.out);
+    assert_eq!(lines.len(), rows + 1);
+    for (i, line) in lines[..rows].iter().enumerate() {
+        assert_eq!(line["row"], i + 1);
+        assert!(
+            line["output"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("{}.txt", i + 1))
+        );
+    }
+    assert_eq!(f.written().len(), rows);
+    let text = fs::read_to_string(f.dir.path().join(format!("out/{rows}.txt"))).unwrap();
+    assert_ne!(text.trim(), "");
+}
+
+#[test]
+fn rows_with_too_many_cells_are_refused_before_anything_is_written() {
+    let mut rows = String::from("data,filename\nok,a\n");
+    rows.push_str(&",".repeat(super::MAX_COLUMNS));
+    rows.push('\n');
+    let f = Fixture::new(&rows);
+    let o = f.run(&[]);
+    assert_eq!(o.status, ExitStatus::Usage);
+    assert_eq!(
+        o.err,
+        format!(
+            "error: '{}' has more than 1000 columns on line 3\n  \
+             hint: keep only the columns the batch uses (data, filename and those --name names)\n",
+            f.input()
+        )
+    );
+    assert_eq!(f.written().len(), 0);
 }

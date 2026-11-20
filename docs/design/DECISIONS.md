@@ -52,6 +52,7 @@
 - **Raster:** `png` 0.17 (indexed or 1-bit output) and `jpeg-encoder` 0.6. `image` 0.25 with `default-features=false` and only `png`, `jpeg` and `webp` is used to *read* logos and decode inputs and to encode lossless WebP.
   - **PR 6:** `png` is 0.18, the version `image` 0.25 already depends on, so there is one copy. `jpeg-encoder` stays on 0.6 because 0.7 needs Rust 1.87 (above the 1.85 MSRV); its licence adds IJG, allowed in `deny.toml` for that crate only and credited in the README. In this PR `image` enables only `webp`; PR 9 adds the `png` and `jpeg` decoders for the logo loader. PNG uses zlib's default level with unfiltered 1-bit rows, not `Fast`: a 290 px code is 424 bytes instead of 1,574 for about 0.1 ms more work. The release binary grew by 132 KB (932,144 to 1,064,528 bytes, aarch64-apple-darwin).
 - **Batch, files and parsing:** `rayon` 1.10 (batch path only), `csv` 1.3, `tempfile` 3, `serde`/`serde_json` 1, `thiserror` 2.
+  - **PR 11 review:** `csv-core` 0.1 (already a `csv` dependency) counts each row's cells before parsing, and `unicode-normalization` 0.1 (MIT/Apache-2.0, pulls in `tinyvec`) puts batch names in NFC for the duplicate check.
 - **Dev:** `proptest` 1, `assert_cmd` 2, `predicates` 3, `insta` 1, `roxmltree` 0.20, `divan` (pick one; no criterion).
 
 ## 2. Binary and v1 CLI surface
@@ -149,6 +150,8 @@ qr man
    - The final path must stay under the canonicalised `--out-dir`.
    - Existing files are refused without `--force`.
    - Defaults are 100k rows and 50 MiB.
+   - **PR 11 review:** a CSV row may have at most 1,000 cells, counted with `csv-core` (nothing stored per cell) before any row is parsed, and each row keeps only the cells the batch uses (data, filename and `--name` columns). A 50 MiB file of 1,000 rows of commas peaked at 1.29 GB before; it is now refused at 57 MB, and 50 MiB of 1,000-cell rows peaks at 63 MB (was 90-105 MB).
+   - Names are unique per batch after NFC, lower case and NFC again, since APFS and HFS+ store NFC and NFD spellings as one file; the later row fails with `duplicate_name`, with or without `--force`.
 8. **WiFi passwords:** `--password-stdin` keeps secrets out of shell history. Payload escaping for WiFi (`\ ; , : "`) and vCard/MeCard is covered by proptest.
 9. **No network access.** cargo-deny bans `reqwest`, `hyper`, `ureq`, `openssl-sys` and `native-tls`. Only crates.io sources are allowed, and licences must be on the allowlist.
 10. **Security acceptance tests** from Security §5, adjusted for the overwrite ruling and with no config test. These must pass before v0.1.0.

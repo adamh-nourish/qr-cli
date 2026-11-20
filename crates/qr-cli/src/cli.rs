@@ -330,20 +330,26 @@ const BATCH_AFTER_HELP: &str = "\
 Input: a CSV file whose first row is a header when one of its cells is
 'data' (that column is encoded; a 'filename' column names the files), or
 without a header, data in the first column and a file name in the second.
-With --lines, every non-blank line is one code. At most 50 MiB and
-100000 rows; a UTF-8 byte order mark is ignored.
+With --lines, every non-blank line is one code. At most 50 MiB, 100000
+rows and 1000 cells per row; a UTF-8 byte order mark is ignored.
 
 File names: --name is a template [default: {filename} when there is a
-filename column, otherwise {n}] with the fields {n} (row number; {n:04}
-pads it), {hash} (16 hex digits of the data), {data}, {filename} and,
-with a header, any column by name. Field values lose path separators,
-':', control characters and leading '.' or '-'; Windows device names
-(CON, NUL, COM1, ...) are refused; names are cut at 200 bytes and get
-the format's extension. Every file stays directly inside --out-dir.
+filename column, otherwise the row number] with the fields {n:04} (the
+row number padded to 4 digits; 'n' alone in braces does not pad it),
+{hash} (16 hex digits of the data), {data}, {filename} and, with a
+header, any column by name. {data} puts the data itself in the name, so
+avoid it for secrets such as WiFi passwords or URL tokens. Field values
+lose path separators, ':', control characters and leading '.' or '-';
+Windows device names (CON, NUL, COM1, ...) are refused; names are cut at
+200 bytes, must be unique ignoring case and Unicode normalization, and
+get the format's extension. Every file stays directly inside --out-dir.
 
 Existing files are never replaced without --force. A row that fails is
 reported and the rest are still written, unless --fail-fast; the exit
-status is then that of the first failed row.
+status is then that of the first failed row. Each file is written
+atomically but not flushed to disk one by one. Styled codes (--logo,
+--shape, colours) are read back automatically, about a fifth of the
+batch time; --no-verify skips that for large runs.
 
 Examples:
   qr batch urls.csv --out-dir codes
@@ -380,7 +386,7 @@ pub struct BatchArgs {
     pub name: Option<String>,
 
     /// Output format [default: png]; text and ascii write .txt files.
-    #[arg(short = 'f', long = "format", value_enum, value_name = "FORMAT")]
+    #[arg(short = 'f', long = "format", value_name = "FORMAT", value_parser = file_format())]
     pub format: Option<OutputFormat>,
 
     /// How each code is encoded and drawn.
@@ -408,6 +414,19 @@ pub struct BatchArgs {
     /// and JSON errors on stderr.
     #[arg(long)]
     pub json: bool,
+}
+
+/// The `-f` values `qr batch` accepts: every format but `terminal`, which
+/// is not a file format.
+fn file_format() -> impl clap::builder::TypedValueParser<Value = OutputFormat> {
+    use clap::builder::TypedValueParser as _;
+
+    let values = OutputFormat::value_variants()
+        .iter()
+        .filter(|format| **format != OutputFormat::Terminal)
+        .filter_map(ValueEnum::to_possible_value);
+    clap::builder::PossibleValuesParser::new(values)
+        .try_map(|name| <OutputFormat as ValueEnum>::from_str(&name, false))
 }
 
 /// Options shared by every command.

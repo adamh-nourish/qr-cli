@@ -19,6 +19,10 @@ pub enum BatchError {
     #[error("qr batch writes files, and terminal output is not a file format")]
     TerminalFormat,
 
+    /// `qr batch -` and stdin is a terminal.
+    #[error("no input: stdin is a terminal")]
+    StdinIsTerminal,
+
     /// The input could not be opened or read.
     #[error("cannot read {origin}: {}", io_reason(.error))]
     ReadInput {
@@ -79,8 +83,8 @@ pub enum BatchError {
     #[error(transparent)]
     Name(#[from] NameError),
 
-    /// Two rows name the same file (names that differ only in case count
-    /// as the same, as on macOS and Windows).
+    /// Two rows name the same file (names that differ only in case or in
+    /// Unicode normalization count as the same, as on macOS and Windows).
     #[error("'{}' is also the file of row {first}", .path.display())]
     DuplicateName {
         /// The file both rows name.
@@ -126,6 +130,7 @@ impl BatchError {
     pub const fn exit_status(&self) -> ExitStatus {
         match self {
             Self::TerminalFormat
+            | Self::StdinIsTerminal
             | Self::InputTooLarge { .. }
             | Self::Table { .. }
             | Self::Template(_)
@@ -142,6 +147,7 @@ impl BatchError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::TerminalFormat => "terminal_not_a_file",
+            Self::StdinIsTerminal => "no_input",
             Self::ReadInput { .. } => "read_failed",
             Self::InputTooLarge { .. } => "input_too_large",
             Self::Table {
@@ -152,6 +158,10 @@ impl BatchError {
                 error: TableError::TooManyRows,
                 ..
             } => "too_many_rows",
+            Self::Table {
+                error: TableError::TooManyColumns { .. },
+                ..
+            } => "too_many_columns",
             Self::Table {
                 error: TableError::Csv { .. },
                 ..
@@ -171,6 +181,9 @@ impl BatchError {
     pub fn hint(&self) -> Option<String> {
         let hint = match self {
             Self::TerminalFormat => "use -f png, svg, text or another file format",
+            Self::StdinIsTerminal => {
+                "pipe the CSV in (... | qr batch - --out-dir DIR) or pass a FILE"
+            }
             Self::ReadInput { .. } => "check the FILE path",
             Self::InputTooLarge { .. } => "split the input into smaller files",
             Self::Table {
@@ -181,6 +194,10 @@ impl BatchError {
                 error: TableError::TooManyRows,
                 ..
             } => "split the input into batches of at most 100000 rows",
+            Self::Table {
+                error: TableError::TooManyColumns { .. },
+                ..
+            } => "keep only the columns the batch uses (data, filename and those --name names)",
             Self::Table {
                 error: TableError::Csv { .. },
                 ..

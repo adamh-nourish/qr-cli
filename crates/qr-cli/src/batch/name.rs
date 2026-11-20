@@ -35,8 +35,8 @@ pub enum NameError {
     /// The name is a Windows device name, such as `CON` or `com1.png`.
     #[error("'{0}' is a reserved device name on Windows")]
     Reserved(String),
-    /// The name would leave `--out-dir`. [`sanitize_field`] and
-    /// [`file_name`] never produce such a name; this is the last check.
+    /// The name would leave `--out-dir`. `sanitize_field` and
+    /// `file_name` never produce such a name; this is the last check.
     #[error("'{0}' is not a plain file name inside the output directory")]
     Escapes(String),
 }
@@ -187,6 +187,11 @@ impl OutDir {
     /// The I/O error if the directory cannot be created or resolved, or
     /// [`io::ErrorKind::NotADirectory`] if `path` is something else.
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        // Checked first, so a file gives "not a directory" rather than
+        // the "file exists" `create_dir_all` reports.
+        if fs::metadata(path).is_ok_and(|meta| !meta.is_dir()) {
+            return Err(io::ErrorKind::NotADirectory.into());
+        }
         fs::create_dir_all(path)?;
         let canonical = fs::canonicalize(path)?;
         if !fs::metadata(&canonical)?.is_dir() {
