@@ -1,8 +1,8 @@
 //! Command-line argument definitions.
 //!
-//! Generation is the root command (`qr [OPTIONS] [TEXT]`); subcommands are
-//! for tooling and, in later changes, structured payloads, `decode` and
-//! `batch`. Keeping every clap type in this module lets completions and the
+//! Generation is the root command (`qr [OPTIONS] [TEXT]`); subcommands
+//! build structured [`payload`]s (`qr wifi`, `qr vcard`, ...) or are
+//! tooling, and later changes add `decode` and `batch`. Keeping every clap type in this module lets completions and the
 //! man page be generated from a single source of truth.
 
 use std::path::PathBuf;
@@ -12,6 +12,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use qr_core::render::{MAX_CANVAS_SIDE, MAX_DPI};
 use qr_core::{Color, EcLevel, Mask, ModeChoice, ModuleShape, Version};
+
+pub mod payload;
+
+pub use self::payload::PayloadCommand;
 
 /// The largest `--margin` accepted, in modules. Equal to the renderer's own
 /// cap, [`qr_core::render::MAX_MARGIN`] (a test keeps them in step).
@@ -31,8 +35,10 @@ Examples:
   qr 'hi' --shape dots --fg navy -o c.png
                                Write a styled PNG (checked automatically)
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
-  qr -- help                   Encode a word that is also a command name,
-                               such as 'help', 'man' or 'completions'
+  qr wifi --ssid Home --password-stdin < pw.txt
+                               Share a WiFi network (see 'qr wifi --help')
+  qr -- wifi                   Encode a word that is also a command name,
+                               such as 'wifi', 'url', 'email' or 'help'
 
 Exit codes:
   0 ok, 1 internal error, 2 usage error, 3 data too long, 4 I/O error,
@@ -51,7 +57,7 @@ Exit codes:
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
-    /// A tooling subcommand. Without one, `qr` generates a code.
+    /// A payload or tooling subcommand. Without one, `qr` encodes TEXT.
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -64,9 +70,26 @@ pub struct Cli {
     pub global: GlobalArgs,
 }
 
+impl Cli {
+    /// The render options in effect: a payload subcommand's own, or the
+    /// default command's.
+    pub fn render_args(&self) -> &RenderArgs {
+        match &self.command {
+            Some(Command::Payload(command)) => &command.output().render,
+            _ => &self.generate.render,
+        }
+    }
+}
+
 /// Subcommands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Subcommand)]
+// Parsed once per run, so the size of the payload variant does not matter.
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
+    /// A structured payload: `url`, `wifi`, `vcard`, `mecard`, `email`,
+    /// `sms`, `tel`, `geo` or `event`.
+    #[command(flatten)]
+    Payload(PayloadCommand),
     /// Print a shell completion script to stdout.
     Completions {
         /// The shell to generate completions for.
@@ -77,12 +100,12 @@ pub enum Command {
     Man,
 }
 
-/// Options for generating a code.
+/// Options for generating a code from text, a file or stdin.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
-#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
 pub struct GenerateArgs {
     /// Text to encode; quote it if it contains spaces. '-' reads stdin, which
-    /// is also the default when stdin is not a terminal.
+    /// is also the default when stdin is not a terminal. Put -- before text
+    /// that is also a command name: qr -- wifi.
     #[arg(value_name = "TEXT")]
     pub text: Option<String>,
 
@@ -95,6 +118,20 @@ pub struct GenerateArgs {
     )]
     pub input: Option<PathBuf>,
 
+    /// Keep a trailing newline read from stdin or a file.
+    #[arg(long)]
+    pub keep_newline: bool,
+
+    /// Output, encoding and styling options.
+    #[command(flatten)]
+    pub render: RenderArgs,
+}
+
+/// Options that control how a code is encoded, drawn and written. The
+/// default command and every payload subcommand share them.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
+pub struct RenderArgs {
     /// Write the code to PATH ('-' for stdout, not /dev/stdout). Existing
     /// files are replaced atomically and keep their permissions; a symlink
     /// is replaced, not followed.
@@ -205,10 +242,6 @@ pub struct GenerateArgs {
     /// Print a JSON result object on stdout and JSON errors on stderr.
     #[arg(long)]
     pub json: bool,
-
-    /// Keep a trailing newline read from stdin or a file.
-    #[arg(long)]
-    pub keep_newline: bool,
 }
 
 /// Options shared by every command.
@@ -301,8 +334,10 @@ mod tests {
     #[test]
     fn defaults_match_the_design_record() {
         let cli = Cli::try_parse_from(["qr", "x"]).unwrap();
-        let g = cli.generate;
-        assert_eq!(g.text.as_deref(), Some("x"));
+        assert_eq!(cli.generate.text.as_deref(), Some("x"));
+        assert!(!cli.generate.keep_newline);
+        assert_eq!(cli.generate.input, None);
+        let g = cli.render_args().clone();
         assert_eq!(g.ec_level, EcLevel::M);
         assert_eq!(g.mode, ModeChoice::Auto);
         assert_eq!(g.margin, 4);
@@ -323,6 +358,79 @@ mod tests {
         assert_eq!(cli.generate.text.as_deref(), Some("completions"));
         let cli = Cli::try_parse_from(["qr", "man"]).unwrap();
         assert_eq!(cli.command, Some(Command::Man));
+    }
+
+    #[test]
+    fn payload_subcommands_take_the_render_options() {
+        let cli = Cli::try_parse_from([
+            "qr", "wifi", "--ssid", "Home", "--auth", "WPA2", "--hidden", "-o", "w.png", "--shape",
+            "dots", "--ec", "H",
+        ])
+        .unwrap();
+        let Some(Command::Payload(PayloadCommand::Wifi(wifi))) = &cli.command else {
+            panic!("expected wifi: {:?}", cli.command);
+        };
+        assert_eq!(wifi.ssid, "Home");
+        assert_eq!(wifi.auth, qr_core::payload::WifiAuth::Wpa);
+        assert!(wifi.hidden && !wifi.password_stdin && wifi.password.is_none());
+        let render = cli.render_args();
+        assert_eq!(
+            render.output.as_deref(),
+            Some(std::path::Path::new("w.png"))
+        );
+        assert_eq!((render.shape, render.ec_level), (Shape::Dots, EcLevel::H));
+        assert!(!wifi.output.print_payload);
+    }
+
+    #[test]
+    fn payload_flags_conflict_where_they_should() {
+        for args in [
+            &[
+                "qr",
+                "wifi",
+                "--ssid",
+                "a",
+                "--password",
+                "p",
+                "--password-stdin",
+            ][..],
+            &["qr", "tel", "1", "--print-payload", "-o", "a.png"],
+            &["qr", "tel", "1", "--print-payload", "--json"],
+            &["qr", "-o", "a.png", "tel", "1"],
+        ] {
+            let err = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{args:?}"
+            );
+        }
+        let err = Cli::try_parse_from(["qr", "wifi", "--ssid", "a", "--auth", "wpa4"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(err.to_string().contains("expected wpa, wep or nopass"));
+    }
+
+    #[test]
+    fn geo_takes_negative_coordinates() {
+        let cli = Cli::try_parse_from(["qr", "geo", "-33.8", "-151.2", "--print-payload"]).unwrap();
+        let Some(Command::Payload(PayloadCommand::Geo(geo))) = cli.command else {
+            panic!("expected geo");
+        };
+        assert_eq!((geo.latitude, geo.longitude), (-33.8, -151.2));
+        assert!(geo.output.print_payload);
+    }
+
+    #[test]
+    fn every_payload_name_is_literal_text_after_double_dash() {
+        for word in [
+            "url", "wifi", "vcard", "mecard", "email", "sms", "tel", "geo", "event",
+        ] {
+            let cli = Cli::try_parse_from(["qr", "--", word]).unwrap();
+            assert!(cli.command.is_none(), "{word}");
+            assert_eq!(cli.generate.text.as_deref(), Some(word));
+            // Without `--`, the word is the subcommand, which needs arguments.
+            assert!(Cli::try_parse_from(["qr", word]).is_err(), "{word}");
+        }
     }
 
     #[test]
@@ -349,7 +457,7 @@ mod tests {
             "x",
         ])
         .unwrap();
-        let g = cli.generate;
+        let g = cli.generate.render;
         assert_eq!(g.output.as_deref(), Some(std::path::Path::new("a.svg")));
         assert_eq!(g.format, Some(OutputFormat::Jpeg));
         assert_eq!(g.scale, Some(3));
@@ -362,7 +470,7 @@ mod tests {
     fn size_and_dpi_parse_and_size_conflicts_with_scale() {
         let cli = Cli::try_parse_from(["qr", "--size", "512", "--dpi", "300", "x"]).unwrap();
         assert_eq!(
-            (cli.generate.size, cli.generate.dpi),
+            (cli.generate.render.size, cli.generate.render.dpi),
             (Some(512), Some(300))
         );
         let err = Cli::try_parse_from(["qr", "--size", "512", "--scale", "4", "x"]).unwrap_err();
@@ -371,7 +479,7 @@ mod tests {
 
     #[test]
     fn shape_and_verify_flags_parse() {
-        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().generate;
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().generate.render;
         let g = parse(&["qr", "--shape", "dots", "x"]);
         assert_eq!(g.shape, Shape::Dots);
         assert_eq!(ModuleShape::from(g.shape), ModuleShape::Dots);

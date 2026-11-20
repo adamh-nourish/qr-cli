@@ -4,8 +4,9 @@
 //! the [`QrEncoder`] abstraction, exact [`capacity`] limits, the typed
 //! [`Color`], the text, vector (SVG, PDF, EPS) and raster (PNG, JPEG,
 //! WebP) [`render`]ers with their [`ModuleShape`]s, colour [`Contrast`],
-//! read-back [`verify`]cation with `rqrr` and [`sanitize_for_terminal`].
-//! Later changes add payload builders and logos. The `qr-cli`
+//! read-back [`verify`]cation with `rqrr`, structured [`payload`]
+//! builders (WiFi, vCard, `mailto:`, iCalendar and more) and
+//! [`sanitize_for_terminal`]. A later change adds logos. The `qr-cli`
 //! crate owns argument parsing, files, streams and exit codes.
 //!
 //! ```
@@ -26,6 +27,7 @@ mod encode;
 mod error;
 mod matrix;
 mod options;
+pub mod payload;
 pub mod render;
 mod sanitize;
 pub mod verify;

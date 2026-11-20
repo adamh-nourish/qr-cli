@@ -1,4 +1,6 @@
-//! The default command: read the input, encode it, render it and write it.
+//! Generating a code: read the input (or build a payload), encode it,
+//! render it and write it. The default command and every payload
+//! subcommand run through here.
 
 use std::io::{Read, Write};
 
@@ -8,19 +10,29 @@ use qr_core::{
     render_raster, render_text, render_vector,
 };
 
-use crate::cli::{ColorChoice, GenerateArgs, OutputFormat, Shape};
+use crate::cli::{ColorChoice, OutputFormat, PayloadCommand, RenderArgs, Shape};
 use crate::diag::Reporter;
 use crate::env::Env;
 use crate::error::CliError;
-use crate::input::{Input, InputRequest, read_input};
+use crate::input::{Input, InputRequest, InputSource, read_input};
 use crate::output::json::{self, Generated};
 use crate::output::{Delivered, Plan, Renderer, Target};
+use crate::payload;
 use crate::style;
 use crate::verify::{self, Subject};
 
-/// Streams and settings the generate command needs.
+/// Where the data to encode comes from.
+pub(crate) enum Source<'a> {
+    /// `TEXT`, `-i FILE` or stdin.
+    Input(InputRequest<'a>),
+    /// A payload subcommand, built once the output plan is known.
+    Payload(&'a PayloadCommand),
+}
+
+/// Streams and settings a generate run needs.
 pub(crate) struct Generate<'a, 'r> {
-    pub(crate) args: &'a GenerateArgs,
+    pub(crate) args: &'a RenderArgs,
+    pub(crate) source: Source<'a>,
     pub(crate) color: ColorChoice,
     pub(crate) env: &'a Env,
     pub(crate) stdin: &'a mut dyn Read,
@@ -33,6 +45,7 @@ impl Generate<'_, '_> {
     pub(crate) fn run(self) -> Result<(), CliError> {
         let Self {
             args,
+            source,
             color,
             env,
             stdin,
@@ -43,12 +56,16 @@ impl Generate<'_, '_> {
         // Output errors come first, before stdin is consumed.
         let plan = Plan::resolve(args, env.stdout_is_tty, reporter)?;
 
-        let request = InputRequest {
-            text: args.text.as_deref(),
-            file: args.input.as_deref(),
-            keep_newline: args.keep_newline,
+        let input = match source {
+            Source::Input(request) => read_input(&request, stdin, env.stdin_is_tty)?,
+            Source::Payload(command) => {
+                let payload = payload::build(command, stdin, env.stdin_is_tty)?;
+                Input {
+                    data: payload.to_string().into_bytes(),
+                    source: InputSource::Payload(payload.kind()),
+                }
+            }
         };
-        let input = read_input(&request, stdin, env.stdin_is_tty)?;
         let code = encode(&input.data, &encode_options(args))?;
         reporter.note("encoded", &describe(&input, &code));
 
@@ -130,7 +147,7 @@ impl Generate<'_, '_> {
 
 /// Warns about image-only flags given with a text format, where they would
 /// otherwise be silently ignored.
-fn warn_unused_image_flags(args: &GenerateArgs, reporter: &mut Reporter<'_>) {
+fn warn_unused_image_flags(args: &RenderArgs, reporter: &mut Reporter<'_>) {
     let unused: Vec<&str> = [
         (args.scale.is_some(), "--scale"),
         (args.size.is_some(), "--size"),
@@ -159,7 +176,7 @@ fn warn_unused_image_flags(args: &GenerateArgs, reporter: &mut Reporter<'_>) {
 
 /// Warns about image settings `format` cannot keep: `--dpi` outside PNG
 /// and JPEG, and transparency in a JPEG.
-fn warn_lost_settings(args: &GenerateArgs, format: OutputFormat, reporter: &mut Reporter<'_>) {
+fn warn_lost_settings(args: &RenderArgs, format: OutputFormat, reporter: &mut Reporter<'_>) {
     let raster = match format.renderer() {
         Renderer::Raster(raster) => Some(raster),
         Renderer::Vector(_) | Renderer::Text => None,
@@ -212,7 +229,7 @@ fn result(plan: &Plan, input: &Input, code: &QrCode, delivered: Delivered) -> Ge
 }
 
 /// The encoder options selected by the flags.
-fn encode_options(args: &GenerateArgs) -> EncodeOptions {
+fn encode_options(args: &RenderArgs) -> EncodeOptions {
     EncodeOptions::default()
         .with_ec_level(args.ec_level)
         .with_mode(args.mode)

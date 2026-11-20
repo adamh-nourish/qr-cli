@@ -10,10 +10,10 @@ use crate::cli::Cli;
 use crate::diag::Verbosity;
 use crate::exit::ExitStatus;
 
-fn args(argv: &[&str]) -> GenerateArgs {
+fn args(argv: &[&str]) -> RenderArgs {
     let mut full = vec!["qr"];
     full.extend_from_slice(argv);
-    Cli::try_parse_from(full).unwrap().generate
+    Cli::try_parse_from(full).unwrap().generate.render
 }
 
 /// Resolves a plan and returns it with whatever was reported on stderr.

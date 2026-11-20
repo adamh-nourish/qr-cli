@@ -8,6 +8,7 @@
 //! - [`cli`]: the clap definition, the single source for help, completions
 //!   and the man page;
 //! - [`input`]: input resolution and bounded reads;
+//! - `payload`: the structured payload subcommands (`qr wifi`, ...);
 //! - [`output`]: output format resolution, atomic file writes, `data:`
 //!   URIs and the `--json` objects;
 //! - `style` and `verify`: colour and shape options, contrast warnings and
@@ -26,6 +27,7 @@ pub mod exit;
 mod generate;
 pub mod input;
 pub mod output;
+mod payload;
 mod style;
 mod tooling;
 mod verify;
@@ -43,7 +45,8 @@ use crate::diag::{Reporter, Verbosity};
 pub use crate::env::Env;
 pub use crate::error::CliError;
 pub use crate::exit::ExitStatus;
-use crate::generate::Generate;
+use crate::generate::{Generate, Source};
+use crate::input::InputRequest;
 
 /// The streams and environment one invocation runs against.
 pub struct Context<'a> {
@@ -84,13 +87,32 @@ where
         global.color.enabled(env.stderr_is_tty, env),
         Verbosity::from_flags(global.quiet, global.verbose),
     )
-    .with_json(cli.generate.json);
+    .with_json(cli.render_args().json);
 
-    let result = match cli.command {
-        Some(Command::Completions { shell }) => tooling::completions(shell, &mut **stdout),
+    let result = match &cli.command {
+        Some(Command::Completions { shell }) => tooling::completions(*shell, &mut **stdout),
         Some(Command::Man) => tooling::man(&mut **stdout),
+        Some(Command::Payload(command)) if command.output().print_payload => {
+            payload::build(command, &mut **stdin, env.stdin_is_tty)
+                .and_then(|p| payload::print(&p, &mut **stdout, env.stdout_is_tty))
+        }
+        Some(Command::Payload(command)) => Generate {
+            args: &command.output().render,
+            source: Source::Payload(command),
+            color: global.color,
+            env,
+            stdin: &mut **stdin,
+            stdout: &mut **stdout,
+            reporter: &mut reporter,
+        }
+        .run(),
         None => Generate {
-            args: &cli.generate,
+            args: &cli.generate.render,
+            source: Source::Input(InputRequest {
+                text: cli.generate.text.as_deref(),
+                file: cli.generate.input.as_deref(),
+                keep_newline: cli.generate.keep_newline,
+            }),
             color: global.color,
             env,
             stdin: &mut **stdin,

@@ -3,6 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use qr_core::payload::PayloadError;
 use qr_core::verify::VerifyError;
 use qr_core::{EcLevel, EncodeError, RenderError, max_chars};
 
@@ -23,6 +24,15 @@ pub enum CliError {
     /// No `TEXT` or `-i FILE`, and stdin is a terminal.
     #[error("no input: stdin is a terminal")]
     StdinIsTerminal,
+
+    /// `--password-stdin` (or another secret read from stdin) and stdin is
+    /// a terminal, where the secret would be echoed as it is typed.
+    #[error("no password: stdin is a terminal")]
+    SecretStdinIsTerminal,
+
+    /// A payload subcommand's fields are invalid.
+    #[error(transparent)]
+    Payload(#[from] PayloadError),
 
     /// The input was empty (after stripping a trailing newline).
     #[error("no data to encode: {origin} is empty")]
@@ -120,6 +130,8 @@ impl CliError {
     pub const fn exit_status(&self) -> ExitStatus {
         match self {
             Self::StdinIsTerminal
+            | Self::SecretStdinIsTerminal
+            | Self::Payload(_)
             | Self::EmptyInput { .. }
             | Self::Encode(EncodeError::InvalidCharacter { .. })
             | Self::UnknownExtension(_)
@@ -156,7 +168,8 @@ impl CliError {
     /// A stable machine-readable name for the error, used by `--json`.
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::StdinIsTerminal => "no_input",
+            Self::StdinIsTerminal | Self::SecretStdinIsTerminal => "no_input",
+            Self::Payload(_) => "invalid_payload",
             Self::EmptyInput { .. } => "empty_input",
             Self::InputTooLong { .. } | Self::Encode(EncodeError::DataTooLong(_)) => {
                 "data_too_long"
@@ -185,6 +198,13 @@ impl CliError {
         match self {
             Self::StdinIsTerminal | Self::EmptyInput { .. } => {
                 Some("pass TEXT, pipe data to stdin or use -i FILE (see 'qr --help')".to_owned())
+            }
+            Self::SecretStdinIsTerminal => Some(
+                "pipe it in, for example: qr wifi --ssid NAME --password-stdin < password.txt"
+                    .to_owned(),
+            ),
+            Self::Payload(PayloadError::ControlCharacter { .. }) => {
+                Some("remove the control character from the value".to_owned())
             }
             Self::Encode(EncodeError::DataTooLong(e)) if e.ec_level != EcLevel::L => Some(format!(
                 "shorten the input or lower --ec (now {}; at L it holds up to {} {})",
@@ -239,15 +259,16 @@ impl CliError {
             } else {
                 remedy.hint().to_owned()
             }),
-            Self::Verify {
-                error: VerifyError::Render(_),
-                ..
-            } => None,
-            Self::Verify { .. } => Some("this is a bug; please report it".to_owned()),
-            // A render error's message already says what to change.
-            Self::ReadInput { .. } | Self::Output(_) | Self::WriteFile { .. } | Self::Render(_) => {
-                None
+            Self::Verify { error, .. } if !matches!(error, VerifyError::Render(_)) => {
+                Some("this is a bug; please report it".to_owned())
             }
+            // A render or payload error's message already says what to change.
+            Self::Verify { .. }
+            | Self::ReadInput { .. }
+            | Self::Output(_)
+            | Self::WriteFile { .. }
+            | Self::Render(_)
+            | Self::Payload(_) => None,
         }
     }
 }
@@ -360,6 +381,27 @@ mod tests {
                 assert!(err.hint().is_some(), "{err}");
             }
         }
+    }
+
+    #[test]
+    fn payload_errors_are_usage_errors() {
+        let control = CliError::from(PayloadError::ControlCharacter {
+            field: "SSID",
+            character: '\n',
+        });
+        assert_eq!(control.exit_status(), ExitStatus::Usage);
+        assert_eq!(control.code(), "invalid_payload");
+        assert_eq!(
+            control.to_string(),
+            "the SSID contains the control character U+000A"
+        );
+        assert!(control.hint().is_some());
+        let empty = CliError::from(PayloadError::Empty { field: "SSID" });
+        assert_eq!(empty.hint(), None);
+        let tty = CliError::SecretStdinIsTerminal;
+        assert_eq!(tty.exit_status(), ExitStatus::Usage);
+        assert_eq!(tty.code(), "no_input");
+        assert!(tty.hint().unwrap().contains("--password-stdin"));
     }
 
     #[test]

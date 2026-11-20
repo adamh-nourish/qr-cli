@@ -11,7 +11,7 @@
 use qr_core::verify::{Verified, VerifyError, verify_raster, verify_rendering};
 use qr_core::{Color, Matrix, ModuleShape, RenderOptions};
 
-use crate::cli::GenerateArgs;
+use crate::cli::RenderArgs;
 use crate::diag::Reporter;
 use crate::error::CliError;
 use crate::output::Renderer;
@@ -110,7 +110,7 @@ pub(crate) enum Mode {
 impl Mode {
     /// The mode for `args`: `--verify` and `--no-verify` decide, otherwise
     /// styled images (never text) are checked.
-    pub(crate) fn select(args: &GenerateArgs, renderer: Renderer, styled: bool) -> Self {
+    pub(crate) fn select(args: &RenderArgs, renderer: Renderer, styled: bool) -> Self {
         if args.verify {
             Self::Explicit
         } else if args.no_verify || renderer == Renderer::Text || !styled {
@@ -252,11 +252,11 @@ mod tests {
     const PNG: Renderer = Renderer::Raster(RasterFormat::Png);
     const SVG: Renderer = Renderer::Vector(VectorFormat::Svg);
 
-    fn args(extra: &[&str]) -> GenerateArgs {
+    fn args(extra: &[&str]) -> RenderArgs {
         let mut argv = vec!["qr"];
         argv.extend_from_slice(extra);
         argv.push("x");
-        Cli::try_parse_from(argv).unwrap().generate
+        Cli::try_parse_from(argv).unwrap().generate.render
     }
 
     #[test]
