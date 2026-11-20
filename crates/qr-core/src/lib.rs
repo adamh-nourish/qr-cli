@@ -6,8 +6,9 @@
 //! WebP) [`render`]ers with their [`ModuleShape`]s, colour [`Contrast`],
 //! read-back [`verify`]cation with `rqrr`, structured [`payload`]
 //! builders (WiFi, vCard, `mailto:`, iCalendar and more),
-//! [`sanitize_for_terminal`], [`logo`] overlays and the bounded image
-//! [`loader`] they (and later `qr decode`) read images with. The `qr-cli`
+//! [`sanitize_for_terminal`], [`logo`] overlays, the bounded image
+//! [`loader`] they read images with and [`decode`], which finds and reads
+//! every code in a loaded image for `qr decode`. The `qr-cli`
 //! crate owns argument parsing, files, streams and exit codes; the loader
 //! takes a reader and never opens a path itself.
 //!
@@ -25,8 +26,10 @@
 pub mod capacity;
 mod color;
 mod contrast;
+pub mod decode;
 mod encode;
 mod error;
+mod finders;
 pub mod loader;
 pub mod logo;
 mod matrix;

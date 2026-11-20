@@ -37,6 +37,7 @@ use image::{DynamicImage, ImageDecoder as _, ImageFormat, ImageReader};
 use thiserror::Error;
 
 use crate::color::Color;
+use crate::finders;
 use crate::logo::Planned;
 use crate::matrix::Matrix;
 use crate::render::raster::{GreyImage, GreyRows, luma};
@@ -48,8 +49,9 @@ pub const VERIFY_SCALE: u32 = DEFAULT_SCALE;
 
 /// The smallest module size, in pixels, handed to `rqrr`. Smaller images
 /// are enlarged first: with one pixel per module `rqrr` 0.9 can trip an
-/// internal assertion, which would abort a release build.
-const MIN_READ_SCALE: usize = 3;
+/// internal assertion, which would abort a release build. `qr decode`
+/// ([`crate::decode`]) applies the same guard to images of unknown scale.
+pub(crate) const MIN_READ_SCALE: usize = 3;
 
 /// The most pixels verification decodes: 2,048 x 2,048. A version 40
 /// symbol with the default quiet zone fits at 11 pixels per module.
@@ -86,6 +88,18 @@ pub enum VerifyError {
         /// The number of bytes read back.
         decoded: usize,
     },
+    /// The image holds more finder-like patterns than are searched
+    /// ([`crate::decode::MAX_FINDER_CANDIDATES`]), for example from a
+    /// logo tiled with them, so it was not read (DECISIONS section 4.3).
+    #[error(
+        "the rendered {format} holds more than {limit} finder-like patterns, too many to read back"
+    )]
+    TooManyFinders {
+        /// The output format, such as `png`.
+        format: &'static str,
+        /// The most finder-pattern candidates searched.
+        limit: usize,
+    },
     /// The image to read back could not be drawn.
     #[error(transparent)]
     Render(#[from] RenderError),
@@ -101,10 +115,14 @@ pub enum VerifyError {
 
 impl VerifyError {
     /// Whether the code itself failed verification (it could not be read,
-    /// or read back as different data), as opposed to verification being
-    /// unable to run.
+    /// read back as different data, or was refused for holding too many
+    /// finder-like patterns), as opposed to verification being unable to
+    /// run.
     pub const fn is_failure(&self) -> bool {
-        matches!(self, Self::NotFound { .. } | Self::Mismatch { .. })
+        matches!(
+            self,
+            Self::NotFound { .. } | Self::Mismatch { .. } | Self::TooManyFinders { .. }
+        )
     }
 }
 
@@ -537,11 +555,11 @@ fn read(
         redrawn,
         inverted,
     };
-    let normal = scan(source, layout, expected, false)?;
+    let normal = scan(source, layout, expected, format, false)?;
     if normal == Read::Match {
         return Ok(verified(false));
     }
-    let inverse = scan(source, layout, expected, true)?;
+    let inverse = scan(source, layout, expected, format, true)?;
     match (normal, inverse) {
         (_, Read::Match) => Ok(verified(true)),
         (Read::Mismatch(decoded), _) | (_, Read::Mismatch(decoded)) => Err(VerifyError::Mismatch {
@@ -554,11 +572,12 @@ fn read(
 }
 
 /// Detects and decodes every symbol in `source` placed by `layout`
-/// (inverted if asked).
+/// (inverted if asked), unless it holds too many finder patterns.
 fn scan(
     source: &Source<'_>,
     layout: &Layout,
     expected: &[u8],
+    format: &'static str,
     invert: bool,
 ) -> Result<Read, VerifyError> {
     let mut pixels = Pixels::new(source.rows()?, *layout, invert);
@@ -568,6 +587,15 @@ fn scan(
         });
     if let Some(e) = pixels.failed {
         return Err(e);
+    }
+    // Pixels of a freshly prepared image are 0 (light) or 1 (dark).
+    if finders::too_many(prepared.width(), prepared.height(), |x, y| {
+        prepared.get_pixel_at(x, y) == 1
+    }) {
+        return Err(VerifyError::TooManyFinders {
+            format,
+            limit: finders::MAX_FINDER_CANDIDATES,
+        });
     }
     let mut first = None;
     for grid in prepared.detect_grids() {
@@ -718,6 +746,31 @@ mod tests {
     }
 
     #[test]
+    fn a_logo_tiled_with_finder_patterns_is_refused_quickly() {
+        // The decode bound covers --verify too: a logo is user input.
+        use crate::logo::{Logo, LogoScale};
+        let data = [b'L'; 100];
+        let options = EncodeOptions::default().with_ec_level(crate::EcLevel::H);
+        let m = encode(&data, &options).unwrap().matrix().clone();
+        let logo = Logo::new(finders::finder_grid(12, 3, 1, 300)).with_scale(LogoScale::MAX);
+        let options = RenderOptions::default()
+            .with_scale(30)
+            .with_logo(Some(logo));
+        let png = render_raster(&m, RasterFormat::Png, &options).unwrap();
+        let started = std::time::Instant::now();
+        let err = verify_raster(&m, RasterFormat::Png, &png, &options, &data).unwrap_err();
+        assert_eq!(
+            err,
+            VerifyError::TooManyFinders {
+                format: "png",
+                limit: crate::decode::MAX_FINDER_CANDIDATES
+            }
+        );
+        assert!(err.is_failure());
+        assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+    }
+
+    #[test]
     fn a_mismatch_still_tries_the_inverse() {
         // A dark-on-light code holding other data beside the light-on-dark
         // code that holds the expected data: the normal pass finds only the
@@ -739,7 +792,7 @@ mod tests {
             light: 255,
         };
         assert_eq!(
-            scan(&source, &layout, b"the real one", false).unwrap(),
+            scan(&source, &layout, b"the real one", "png", false).unwrap(),
             Read::Mismatch(10)
         );
         let verified = read(&source, &layout, b"the real one", "png", false).unwrap();

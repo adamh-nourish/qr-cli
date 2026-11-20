@@ -3,6 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use qr_core::decode::DecodeError;
 use qr_core::loader::LoadError;
 use qr_core::payload::PayloadError;
 use qr_core::verify::VerifyError;
@@ -145,9 +146,71 @@ pub enum CliError {
         error: io::Error,
     },
 
+    /// `qr decode -` and stdin is a terminal.
+    #[error("no image: stdin is a terminal")]
+    ImageStdinIsTerminal,
+
+    /// `qr decode` was given `-` more than once.
+    #[error("stdin ('-') can be read only once")]
+    StdinTwice,
+
+    /// `qr decode --raw` and stdout is a terminal.
+    #[error("refusing to write --raw output to a terminal")]
+    RawToTerminal,
+
+    /// A `qr decode` image could not be opened or read.
+    #[error("cannot read {origin}: {}", io_reason(.error))]
+    ReadImage {
+        /// The image.
+        origin: InputSource,
+        /// The underlying failure.
+        #[source]
+        error: io::Error,
+    },
+
+    /// A `qr decode` image is not an acceptable image (not PNG, JPEG or
+    /// WebP, corrupt, or over a limit).
+    #[error("cannot decode {origin}: {error}")]
+    Image {
+        /// The image.
+        origin: InputSource,
+        /// What is wrong with it.
+        #[source]
+        error: LoadError,
+    },
+
+    /// A `qr decode` image was refused before it was searched, because it
+    /// holds too many finder-like patterns (DECISIONS section 4.3).
+    #[error("cannot decode {origin}: {error}")]
+    Search {
+        /// The image.
+        origin: InputSource,
+        /// Why it was refused.
+        #[source]
+        error: DecodeError,
+    },
+
+    /// A `qr decode` image holds no code that could be read.
+    #[error("{}", no_code_message(.origin, *.undecodable))]
+    NoCodeFound {
+        /// The image.
+        origin: InputSource,
+        /// How many symbols were seen but could not be decoded.
+        undecodable: usize,
+    },
+
     /// A bug: something that should be impossible happened.
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// The message for [`CliError::NoCodeFound`].
+fn no_code_message(origin: &InputSource, undecodable: usize) -> String {
+    match undecodable {
+        0 => format!("no QR code found in {origin}"),
+        1 => format!("a QR code in {origin} could not be decoded"),
+        n => format!("{n} QR codes in {origin} could not be decoded"),
+    }
 }
 
 impl CliError {
@@ -163,7 +226,11 @@ impl CliError {
             | Self::BinaryToTerminal(_)
             | Self::DataUriNeedsImage(_)
             | Self::JsonNeedsOutput(_)
-            | Self::LogoNeedsImage(_) => ExitStatus::Usage,
+            | Self::LogoNeedsImage(_)
+            | Self::ImageStdinIsTerminal
+            | Self::StdinTwice
+            | Self::RawToTerminal => ExitStatus::Usage,
+            Self::NoCodeFound { .. } => ExitStatus::NoCodeFound,
             Self::Logo { error, .. } if error.is_invalid_image() => ExitStatus::Usage,
             Self::Verify { error, .. } if error.is_failure() => ExitStatus::VerificationFailed,
             // An encoder failing on valid options is not the user's fault.
@@ -185,6 +252,9 @@ impl CliError {
             Self::ReadInput { .. }
             | Self::ReadLogo { .. }
             | Self::Logo { .. }
+            | Self::ReadImage { .. }
+            | Self::Image { .. }
+            | Self::Search { .. }
             | Self::Output(_)
             | Self::OutputExists(_)
             | Self::OutputNotAFile(_)
@@ -197,14 +267,26 @@ impl CliError {
     /// A stable machine-readable name for the error, used by `--json`.
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::StdinIsTerminal | Self::SecretStdinIsTerminal => "no_input",
+            Self::StdinIsTerminal | Self::SecretStdinIsTerminal | Self::ImageStdinIsTerminal => {
+                "no_input"
+            }
+            Self::StdinTwice => "stdin_twice",
+            Self::RawToTerminal => "raw_to_terminal",
+            Self::Image { error, .. } if error.is_invalid_image() => "invalid_image",
+            Self::Search { .. } => "too_many_finders",
+            Self::NoCodeFound { undecodable: 0, .. } => "no_code_found",
+            Self::NoCodeFound { .. } => "undecodable",
             Self::Payload(_) => "invalid_payload",
             Self::EmptyInput { .. } => "empty_input",
             Self::InputTooLong { .. } | Self::Encode(EncodeError::DataTooLong(_)) => {
                 "data_too_long"
             }
             Self::Encode(EncodeError::InvalidCharacter { .. }) => "invalid_character",
-            Self::ReadInput { .. } | Self::ReadLogo { .. } => "read_failed",
+            // An image that could not be read, like any other read.
+            Self::ReadInput { .. }
+            | Self::ReadLogo { .. }
+            | Self::ReadImage { .. }
+            | Self::Image { .. } => "read_failed",
             Self::Output(_) | Self::WriteFile { .. } => "write_failed",
             Self::UnknownExtension(_) => "unknown_extension",
             Self::BinaryToTerminal(_) => "binary_to_terminal",
@@ -270,6 +352,13 @@ impl CliError {
                 Some("use -f png, -f svg or an -o name ending in .png or .svg".to_owned())
             }
             Self::ReadLogo { .. } => Some("check the path passed to --logo".to_owned()),
+            Self::ImageStdinIsTerminal
+            | Self::StdinTwice
+            | Self::RawToTerminal
+            | Self::ReadImage { .. }
+            | Self::Image { .. }
+            | Self::Search { .. }
+            | Self::NoCodeFound { .. } => self.decode_hint(),
             Self::Logo {
                 error:
                     LoadError::UnsupportedFormat
@@ -324,6 +413,56 @@ impl CliError {
             | Self::Render(_) => None,
         }
     }
+
+    /// [`Self::hint`] for the `qr decode` errors.
+    fn decode_hint(&self) -> Option<String> {
+        let hint = match self {
+            Self::ImageStdinIsTerminal => "pipe an image in, for example: qr decode - < code.png",
+            Self::StdinTwice => "pass '-' once and name the other images by path",
+            Self::RawToTerminal => {
+                "redirect or pipe stdout, or drop --raw to print the data escaped"
+            }
+            Self::ReadImage {
+                origin: InputSource::Stdin,
+                ..
+            } => "check the command that pipes the image in",
+            Self::ReadImage { error, .. } if error.kind() == io::ErrorKind::IsADirectory => {
+                "name an image file, not a directory"
+            }
+            Self::ReadImage { error, .. } if error.kind() == io::ErrorKind::PermissionDenied => {
+                "check that you can read the image"
+            }
+            Self::ReadImage { .. } => "check the image path",
+            Self::Image {
+                origin: InputSource::File(path),
+                error: LoadError::UnsupportedFormat,
+            } if is_vector(path) => {
+                "qr decode reads png, jpeg and webp; render the code with -f png to decode it"
+            }
+            Self::Image {
+                error: LoadError::Empty | LoadError::Truncated { .. },
+                ..
+            } => "check the file is a complete image",
+            Self::Image {
+                error: LoadError::UnsupportedFormat | LoadError::Decode { .. },
+                ..
+            } => "qr decode reads png, jpeg and webp images",
+            Self::Image {
+                error:
+                    LoadError::FileTooLarge { .. }
+                    | LoadError::DimensionsTooLarge { .. }
+                    | LoadError::TooMuchMemory { .. },
+                ..
+            } => "scale the image down (a code needs only a few pixels per module)",
+            Self::Search { .. } => "crop the image to the code you want to read",
+            Self::NoCodeFound { undecodable: 0, .. } => {
+                "crop the image closer to the code and check it is sharp and not cut off"
+            }
+            Self::NoCodeFound { .. } => "try a sharper, larger or straighter picture of the code",
+            _ => return None,
+        };
+        Some(hint.to_owned())
+    }
 }
 
 impl From<WriteError> for CliError {
@@ -334,6 +473,16 @@ impl From<WriteError> for CliError {
             WriteError::Io { path, error } => Self::WriteFile { path, error },
         }
     }
+}
+
+/// Whether `path` names one of the vector formats `qr` writes but
+/// `qr decode` cannot read.
+fn is_vector(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["svg", "pdf", "eps"]
+            .iter()
+            .any(|v| e.eq_ignore_ascii_case(v))
+    })
 }
 
 /// A lowercase description of an I/O failure.

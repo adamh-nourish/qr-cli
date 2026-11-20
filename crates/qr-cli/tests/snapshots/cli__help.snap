@@ -17,6 +17,7 @@ Commands:
   tel          Encode a phone number to call (a tel: link)
   geo          Encode a location (a geo: link)
   event        Encode a calendar event (iCalendar)
+  decode       Read the QR codes in PNG, JPEG or WebP images and print their data
   completions  Print a shell completion script to stdout
   man          Print the man page (roff) to stdout
   help         Print this message or the help of the given subcommand(s)
@@ -144,7 +145,7 @@ Options:
           Print errors only, no warnings
 
   -v, --verbose
-          Also print what was encoded and how
+          Also print details on stderr (what was encoded, or decoded, and how)
 
   -h, --help
           Print help (see a summary with '-h')
@@ -165,6 +166,7 @@ Examples:
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr wifi --ssid Home --password-stdin < pw.txt
                                Share a WiFi network (see 'qr wifi --help')
+  qr decode code.png           Print the data held in an image's QR codes
   qr -- wifi                   Encode a word that is also a command name,
                                such as 'wifi', 'url', 'email' or 'help'
 

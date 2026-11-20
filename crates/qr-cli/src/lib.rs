@@ -9,6 +9,7 @@
 //!   and the man page;
 //! - [`input`]: input resolution and bounded reads;
 //! - `payload`: the structured payload subcommands (`qr wifi`, ...);
+//! - `decode`: `qr decode`, reading codes back from images;
 //! - [`output`]: output format resolution, atomic file writes, `data:`
 //!   URIs and the `--json` objects;
 //! - `style` and `verify`: colour and shape options, contrast warnings and
@@ -21,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cli;
+mod decode;
 pub mod diag;
 pub mod env;
 pub mod error;
@@ -43,6 +45,7 @@ use qr_core::{sanitize_for_terminal, sanitize_lines_for_terminal};
 
 pub use crate::cli::Cli;
 use crate::cli::{Command, PayloadCommand};
+use crate::decode::Decode;
 use crate::diag::{Reporter, Verbosity};
 pub use crate::env::Env;
 pub use crate::error::CliError;
@@ -105,44 +108,57 @@ where
         global.color.enabled(env.stderr_is_tty, env),
         Verbosity::from_flags(global.quiet, global.verbose),
     )
-    .with_json(cli.render_args().json);
+    .with_json(cli.json());
 
+    let done = |result: Result<(), CliError>| result.map(|()| ExitStatus::Success);
     let result = match &cli.command {
-        Some(Command::Completions { shell }) => tooling::completions(*shell, &mut **stdout),
-        Some(Command::Man) => tooling::man(&mut **stdout),
-        Some(Command::Payload(command)) if command.output().print_payload => {
+        Some(Command::Completions { shell }) => done(tooling::completions(*shell, &mut **stdout)),
+        Some(Command::Man) => done(tooling::man(&mut **stdout)),
+        Some(Command::Decode(args)) => Decode {
+            args,
+            env,
+            stdin: &mut **stdin,
+            stdout: &mut **stdout,
+            reporter: &mut reporter,
+        }
+        .run(),
+        Some(Command::Payload(command)) if command.output().print_payload => done(
             payload::build(command, &mut **stdin, env.stdin_is_tty)
-                .and_then(|p| payload::print(&p, &mut **stdout, env.stdout_is_tty))
-        }
-        Some(Command::Payload(command)) => Generate {
-            args: &command.output().render,
-            source: Source::Payload(command),
-            color: global.color,
-            env,
-            stdin: &mut **stdin,
-            stdout: &mut **stdout,
-            reporter: &mut reporter,
-        }
-        .run(),
-        None => Generate {
-            args: &cli.generate.render,
-            source: Source::Input(InputRequest {
-                text: cli.generate.text.as_deref(),
-                file: cli.generate.input.as_deref(),
-                keep_newline: cli.generate.keep_newline,
-            }),
-            color: global.color,
-            env,
-            stdin: &mut **stdin,
-            stdout: &mut **stdout,
-            reporter: &mut reporter,
-        }
-        .run(),
+                .and_then(|p| payload::print(&p, &mut **stdout, env.stdout_is_tty)),
+        ),
+        Some(Command::Payload(command)) => done(
+            Generate {
+                args: &command.output().render,
+                source: Source::Payload(command),
+                color: global.color,
+                env,
+                stdin: &mut **stdin,
+                stdout: &mut **stdout,
+                reporter: &mut reporter,
+            }
+            .run(),
+        ),
+        None => done(
+            Generate {
+                args: &cli.generate.render,
+                source: Source::Input(InputRequest {
+                    text: cli.generate.text.as_deref(),
+                    file: cli.generate.input.as_deref(),
+                    keep_newline: cli.generate.keep_newline,
+                }),
+                color: global.color,
+                env,
+                stdin: &mut **stdin,
+                stdout: &mut **stdout,
+                reporter: &mut reporter,
+            }
+            .run(),
+        ),
     }
-    .and_then(|()| stdout.flush().map_err(CliError::Output));
+    .and_then(|status| stdout.flush().map(|()| status).map_err(CliError::Output));
 
     match result {
-        Ok(()) => ExitStatus::Success,
+        Ok(status) => status,
         Err(err) => {
             reporter.error(err.code(), &err.to_string(), err.hint().as_deref());
             err.exit_status()

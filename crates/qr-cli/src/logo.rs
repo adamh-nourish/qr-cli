@@ -2,9 +2,6 @@
 //! loader, the formats that can carry it and the error correction it
 //! needs.
 
-use std::fs::{self, File};
-use std::io;
-
 use qr_core::EcLevel;
 use qr_core::loader::load_image;
 use qr_core::logo::Logo;
@@ -12,6 +9,7 @@ use qr_core::logo::Logo;
 use crate::cli::{OutputFormat, RenderArgs};
 use crate::diag::Reporter;
 use crate::error::CliError;
+use crate::input::open_regular_file;
 use crate::output::Renderer;
 
 /// The error correction level a logo code is encoded at. Clearing the
@@ -82,15 +80,8 @@ pub(crate) fn load(args: &RenderArgs) -> Result<Option<Logo>, CliError> {
         path: path.to_owned(),
         error,
     };
-    let metadata = fs::metadata(path).map_err(read_error)?;
-    if metadata.is_dir() {
-        return Err(read_error(io::Error::from(io::ErrorKind::IsADirectory)));
-    }
-    if !metadata.is_file() {
-        return Err(read_error(io::Error::other("not a regular file")));
-    }
-    let file = File::open(path).map_err(read_error)?;
-    let image = load_image(file, Some(metadata.len())).map_err(|error| CliError::Logo {
+    let (file, len) = open_regular_file(path).map_err(read_error)?;
+    let image = load_image(file, Some(len)).map_err(|error| CliError::Logo {
         path: path.to_owned(),
         error,
     })?;
@@ -103,6 +94,8 @@ pub(crate) fn load(args: &RenderArgs) -> Result<Option<Logo>, CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, io};
+
     use clap::Parser as _;
     use qr_core::logo::LogoScale;
 

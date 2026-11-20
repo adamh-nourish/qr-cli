@@ -56,3 +56,10 @@ path = "fuzz_targets/image_loader.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false

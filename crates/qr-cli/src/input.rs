@@ -7,8 +7,8 @@
 //! buffered in full.
 
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::error::CliError;
@@ -144,6 +144,56 @@ fn read_bounded<R: Read>(reader: R, source: &InputSource) -> Result<Vec<u8>, Cli
     Ok(data)
 }
 
+/// Opens `path` for reading if it is a regular file, and returns it with
+/// its length.
+///
+/// Images (`--logo`, `qr decode`) are only read from regular files: a FIFO
+/// can block and a device can be endless. The path is opened without
+/// blocking (`O_NONBLOCK` on Unix) and the type is checked on the open
+/// handle, so there is no gap between the check and the open in which the
+/// path could be swapped. The length lets the bounded loader refuse an
+/// oversized file before reading it.
+///
+/// # Errors
+///
+/// The metadata or open failure; [`io::ErrorKind::IsADirectory`] for a
+/// directory; an error reading "not a regular file" for anything else that
+/// is not a file.
+pub(crate) fn open_regular_file(path: &Path) -> io::Result<(File, u64)> {
+    let file = open_for_check(path)?;
+    // Checked on the open handle, so a path swapped for a FIFO or device
+    // after a check by name is still refused.
+    let metadata = file.metadata()?;
+    if metadata.is_dir() {
+        return Err(io::Error::from(io::ErrorKind::IsADirectory));
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    Ok((file, metadata.len()))
+}
+
+/// Opens `path` for reading without blocking on a FIFO that has no writer
+/// (`O_NONBLOCK`, which does not affect reading a regular file).
+#[cfg(unix)]
+fn open_for_check(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Opens `path` for reading. Windows cannot open a directory as a file, so
+/// one is reported as a directory first.
+#[cfg(not(unix))]
+fn open_for_check(path: &Path) -> io::Result<File> {
+    if fs::metadata(path)?.is_dir() {
+        return Err(io::Error::from(io::ErrorKind::IsADirectory));
+    }
+    File::open(path)
+}
+
 /// Removes one trailing `\n` or `\r\n`.
 fn strip_trailing_newline(data: &mut Vec<u8>) {
     if data.ends_with(b"\r\n") {
@@ -159,8 +209,8 @@ pub(crate) struct FailingReader;
 
 #[cfg(test)]
 impl Read for FailingReader {
-    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::other("device on fire"))
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::other("device on fire"))
     }
 }
 
@@ -282,7 +332,7 @@ mod tests {
         let input = read_input(&request(None, Some(&path)), FailingReader, true).unwrap();
         assert_eq!(input.data, b"\x00\xffbinary");
         assert_eq!(input.source, InputSource::File(path.clone()));
-        std::fs::remove_file(&path).unwrap();
+        fs::remove_file(&path).unwrap();
 
         let err = read_input(&request(None, Some(&path)), FailingReader, true).unwrap_err();
         assert_eq!(err.exit_status(), ExitStatus::Io);

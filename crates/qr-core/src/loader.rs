@@ -1,7 +1,7 @@
 //! The one bounded image loader (DECISIONS section 4.3).
 //!
-//! Every image the tool reads, a `--logo` today and `qr decode` input
-//! later, goes through [`load_image`] (from any reader) or
+//! Every image the tool reads, a `--logo` or a `qr decode` input, goes
+//! through [`load_image`] (from any reader) or
 //! [`decode_image`] (from bytes already in memory). Both apply the same
 //! limits, in this order, before any pixel is decoded:
 //!
@@ -241,6 +241,11 @@ impl Bitmap {
     /// The pixels, four bytes (red, green, blue, alpha) each, row-major.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    /// The pixels, giving up the bitmap, so they can be converted in place.
+    pub fn into_pixels(self) -> Vec<u8> {
+        self.pixels
     }
 
     /// Whether every pixel is fully opaque.
