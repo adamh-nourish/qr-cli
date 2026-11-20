@@ -21,6 +21,9 @@ pub(crate) struct Canvas<'m> {
     margin: u32,
     scale: u32,
     shape: ModuleShape,
+    /// Pixel rows `[start, end)` that differ from row to row whatever
+    /// the module grid says (under a logo), so are always rebuilt.
+    fresh: Option<(u32, u32)>,
 }
 
 /// Identifies a distinct pixel row: the matrix row and, for shaped modules,
@@ -79,6 +82,7 @@ impl<'m> Canvas<'m> {
             margin: layout.margin,
             scale: layout.scale,
             shape: options.shape,
+            fresh: None,
         })
     }
 
@@ -88,9 +92,22 @@ impl<'m> Canvas<'m> {
     }
 
     /// Pixels per module.
-    #[cfg(test)]
     pub(crate) fn scale(&self) -> u32 {
         self.scale
+    }
+
+    /// The pixel offset of the symbol's top-left module from the image's
+    /// top-left corner (padding plus quiet zone), on both axes.
+    pub(crate) fn origin(&self) -> u32 {
+        // Both terms are parts of `side`, which fits in u32.
+        self.pad + self.margin * self.scale
+    }
+
+    /// Returns this canvas with pixel rows `rows` (`[start, end)`) built
+    /// afresh for every pixel row, as rows under a logo must be.
+    pub(crate) fn with_fresh_rows(mut self, rows: (u32, u32)) -> Self {
+        self.fresh = Some(rows);
+        self
     }
 
     /// The matrix row drawn on pixel row `y` and the pixel row within that
@@ -185,10 +202,14 @@ impl<'m> Canvas<'m> {
         let mut row = Vec::new();
         let mut last = None;
         for y in 0..self.side {
+            let fresh = self
+                .fresh
+                .is_some_and(|(start, end)| (start..end).contains(&y));
             let key = Some(self.row_key(y));
-            if key != last {
+            if fresh || key != last {
                 render(y, &mut row);
-                last = key;
+                // After a fresh row the next one is always rebuilt.
+                last = if fresh { None } else { key };
             }
             emit(&row)?;
         }
@@ -403,6 +424,20 @@ mod tests {
         assert_eq!(result, Ok(()));
         // Quiet, row 0, row 1, quiet.
         assert_eq!((built, emitted), (4, 16));
+        assert_eq!(canvas.origin(), 4);
+
+        // Fresh rows are rebuilt every time, and so is the row after them.
+        let fresh = canvas.with_fresh_rows((5, 7));
+        let mut built_rows = Vec::new();
+        let result: Result<(), ()> = fresh.for_each_row(
+            |y, row: &mut Vec<u8>| {
+                built_rows.push(y);
+                fresh.fill_row(y, 0_u8, 1, row);
+            },
+            |_| Ok(()),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(built_rows, [0, 4, 5, 6, 7, 8, 12]);
         let failed: Result<(), &str> =
             canvas.for_each_row(|_, _: &mut Vec<u8>| {}, |_| Err("stop"));
         assert_eq!(failed, Err("stop"));

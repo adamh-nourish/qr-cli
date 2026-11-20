@@ -24,7 +24,8 @@ const DSC_MAX_LINE: usize = 255;
 /// # Errors
 ///
 /// Returns [`RenderError`] if the scale is zero, the bounding box would
-/// exceed [`MAX_CANVAS_SIDE`] points, or the title is too long.
+/// exceed [`MAX_CANVAS_SIDE`] points, or the title is too long, and
+/// [`RenderError::LogoUnsupported`] if the options carry a logo.
 ///
 /// ```
 /// use qr_core::{EncodeOptions, RenderOptions, encode, render_eps};
@@ -35,6 +36,9 @@ const DSC_MAX_LINE: usize = 255;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn render_eps(matrix: &Matrix, options: &RenderOptions) -> Result<String, RenderError> {
+    if options.logo.is_some() {
+        return Err(RenderError::LogoUnsupported { format: "eps" });
+    }
     let layout = options.layout(matrix, "eps", MAX_CANVAS_SIDE)?;
     let side = layout.side;
 

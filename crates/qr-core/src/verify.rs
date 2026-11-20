@@ -37,6 +37,7 @@ use image::{DynamicImage, ImageDecoder as _, ImageFormat, ImageReader};
 use thiserror::Error;
 
 use crate::color::Color;
+use crate::logo::Planned;
 use crate::matrix::Matrix;
 use crate::render::raster::{GreyImage, GreyRows, luma};
 use crate::render::{DEFAULT_MARGIN, DEFAULT_SCALE, RasterFormat, RenderError, RenderOptions};
@@ -171,6 +172,8 @@ pub fn verify_raster(
     }
     // A PNG is decoded a row at a time, so only its pixel count matters;
     // JPEG and WebP are decoded whole, so their decoded size does too.
+    let redraw;
+    let plan;
     let decodable = u64::from(width) * u64::from(height) <= VERIFY_MAX_PIXELS
         && (format == RasterFormat::Png || decoder.total_bytes() <= VERIFY_MAX_DECODED_BYTES);
     let (source, redrawn) = if !decodable {
@@ -181,7 +184,9 @@ pub fn verify_raster(
         let scale = VERIFY_SCALE
             .min(fitting_scale(matrix, options))
             .min(own.max(1));
-        let rows = GreyRows::new(matrix, &redraw_options(options, scale), backdrop)?;
+        redraw = redraw_options(options, scale);
+        plan = Planned::new(matrix, &redraw)?;
+        let rows = GreyRows::new(matrix, plan.as_ref(), &redraw, backdrop)?;
         (Source::Drawn(rows), true)
     } else if format == RasterFormat::Png {
         drop(decoder);
@@ -227,11 +232,9 @@ pub fn verify_rendering(
 ) -> Result<Verified, VerifyError> {
     let scale = VERIFY_SCALE.min(fitting_scale(matrix, options));
     let backdrop = backdrop(options, true);
-    let source = Source::Drawn(GreyRows::new(
-        matrix,
-        &redraw_options(options, scale),
-        backdrop,
-    )?);
+    let redraw = redraw_options(options, scale);
+    let plan = Planned::new(matrix, &redraw)?;
+    let source = Source::Drawn(GreyRows::new(matrix, plan.as_ref(), &redraw, backdrop)?);
     let layout = Layout::new(source.side(), matrix, options, backdrop);
     read(&source, &layout, expected, format, true)
 }
@@ -701,7 +704,7 @@ mod tests {
     }
 
     fn drawn(matrix: &Matrix, options: &RenderOptions) -> GreyImage {
-        let rows = GreyRows::new(matrix, options, Color::WHITE).unwrap();
+        let rows = GreyRows::new(matrix, None, options, Color::WHITE).unwrap();
         let mut pixels = Vec::new();
         let mut row = Vec::new();
         for y in 0..rows.side() {

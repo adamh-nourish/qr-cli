@@ -1,13 +1,21 @@
 //! SVG renderer, built with the typed [`XmlWriter`].
 //!
 //! The document is a background `<rect>` and one `<path>` holding every dark
-//! run (or, for rounded and dotted modules, every outline). Coordinates are in modules (`viewBox`), and `width`/`height` scale
-//! the drawing to `scale` pixels per module. The output never contains
-//! scripts, event attributes, `<foreignObject>`, links or external
-//! references; colours are written from the typed [`Color`](crate::Color).
+//! run (or, for rounded and dotted modules, every outline). Coordinates are
+//! in modules (`viewBox`), and `width`/`height` scale the drawing to
+//! `scale` pixels per module. The output never contains scripts, event
+//! attributes, `<foreignObject>`, links or external references; colours are
+//! written from the typed [`Color`](crate::Color).
+//!
+//! A logo is one `<image>` whose `href` is always a `data:image/png`
+//! URI: the decoded logo is resampled and re-encoded as PNG here, never
+//! copied from the input file, and the URI is built by a typed value
+//! ([`PngDataUri`]) rather than from a string, so no external reference
+//! can be written.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
+use super::data_uri::base64;
 use super::escape;
 use super::options::{MAX_CANVAS_SIDE, RenderError, RenderOptions};
 use super::outline::{Num, Primitive, Segment, primitives};
@@ -15,6 +23,7 @@ use super::runs::dark_runs;
 use super::shape::ModuleShape;
 use super::xml::XmlWriter;
 use crate::color::Color;
+use crate::logo::{Planned, resample};
 use crate::matrix::Matrix;
 
 /// The SVG namespace. It is an identifier, not a resource that is fetched.
@@ -38,6 +47,9 @@ const SVG_NS: &str = "http://www.w3.org/2000/svg";
 pub fn render_svg(matrix: &Matrix, options: &RenderOptions) -> Result<String, RenderError> {
     let layout = options.layout(matrix, "svg", MAX_CANVAS_SIDE)?;
     let (modules, margin) = (layout.modules, layout.margin);
+    let plan = Planned::new(matrix, options)?;
+    // With a logo, the modules under it are cleared.
+    let matrix = plan.as_ref().map_or(matrix, |p| &p.matrix);
 
     let mut w = XmlWriter::new();
     w.start("svg")
@@ -75,7 +87,83 @@ pub fn render_svg(matrix: &Matrix, options: &RenderOptions) -> Result<String, Re
         fill(&mut w, options.fg);
         w.attr("d", d).end().newline();
     }
+    if let Some(plan) = &plan {
+        logo(&mut w, plan, margin, layout.scale)?;
+    }
     Ok(w.finish())
+}
+
+/// How many image pixels the embedded logo has per pixel it is shown at,
+/// so it stays sharp on high-density screens and when the SVG is enlarged.
+const LOGO_DENSITY: f64 = 2.0;
+
+/// Writes the logo `<image>`: the logo resampled to [`LOGO_DENSITY`]
+/// times its displayed size (never above its own size) and embedded as a
+/// PNG.
+fn logo(w: &mut XmlWriter, plan: &Planned<'_>, margin: u32, scale: u32) -> Result<(), RenderError> {
+    let (x, y, width, height) = plan.geometry.modules(margin);
+    let image = plan.logo.image();
+    let pixels =
+        |modules: f64, max: u32| whole_pixels(modules * f64::from(scale) * LOGO_DENSITY, max);
+    let (px_w, px_h) = (pixels(width, image.width()), pixels(height, image.height()));
+    let colors = resample(image, px_w, px_h).ok_or_else(|| RenderError::Encoder {
+        format: "svg",
+        message: format!("cannot allocate the {px_w}x{px_h} logo"),
+    })?;
+    let png = encode_png(&colors, px_w, px_h)?;
+    w.start("image")
+        .attr("x", Num(x))
+        .attr("y", Num(y))
+        .attr("width", Num(width))
+        .attr("height", Num(height))
+        .attr("preserveAspectRatio", "none")
+        .attr("href", PngDataUri(&png))
+        .end()
+        .newline();
+    Ok(())
+}
+
+/// `value` rounded to whole pixels, from 1 to `max`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn whole_pixels(value: f64, max: u32) -> u32 {
+    // Clamped to 1..=max first, so the cast is exact.
+    value.round().clamp(1.0, f64::from(max.max(1))) as u32
+}
+
+/// A `data:image/png;base64,` URI. The scheme and media type are fixed,
+/// so an `href` written from this value can only ever be embedded data.
+struct PngDataUri<'a>(&'a [u8]);
+
+impl fmt::Display for PngDataUri<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "data:image/png;base64,{}", base64(self.0))
+    }
+}
+
+/// `colors` (straight alpha, row-major) as an 8-bit RGB PNG, or RGBA when
+/// any pixel is translucent.
+fn encode_png(colors: &[Color], width: u32, height: u32) -> Result<Vec<u8>, RenderError> {
+    let error = |e: png::EncodingError| RenderError::Encoder {
+        format: "svg",
+        message: format!("cannot encode the logo: {e}"),
+    };
+    let opaque = colors.iter().all(|c| c.is_opaque());
+    let mut data = Vec::new();
+    for c in colors {
+        data.extend_from_slice(&[c.r, c.g, c.b, c.a][..if opaque { 3 } else { 4 }]);
+    }
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, width, height);
+    encoder.set_color(if opaque {
+        png::ColorType::Rgb
+    } else {
+        png::ColorType::Rgba
+    });
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(error)?;
+    writer.write_image_data(&data).map_err(error)?;
+    writer.finish().map_err(error)?;
+    Ok(out)
 }
 
 /// The path data for every dark run, offset by `margin` modules.

@@ -15,6 +15,7 @@ use crate::diag::Reporter;
 use crate::env::Env;
 use crate::error::CliError;
 use crate::input::{Input, InputRequest, InputSource, read_input};
+use crate::logo;
 use crate::output::json::{self, Generated};
 use crate::output::{Delivered, Plan, Renderer, Target};
 use crate::payload;
@@ -53,8 +54,11 @@ impl Generate<'_, '_> {
             reporter,
         } = self;
 
-        // Output errors come first, before stdin is consumed.
+        // Output and logo errors come first, before stdin is consumed.
         let plan = Plan::resolve(args, env.stdout_is_tty, reporter)?;
+        logo::check_format(args, plan.format)?;
+        let logo = logo::load(args)?;
+        let ec_level = logo::ec_level(args, reporter);
 
         let input = match source {
             Source::Input(request) => read_input(&request, stdin, env.stdin_is_tty)?,
@@ -66,7 +70,7 @@ impl Generate<'_, '_> {
                 }
             }
         };
-        let code = encode(&input.data, &encode_options(args))?;
+        let code = encode(&input.data, &encode_options(args).with_ec_level(ec_level))?;
         reporter.note("encoded", &describe(&input, &code));
 
         if usize::from(args.margin) < DEFAULT_MARGIN {
@@ -81,7 +85,7 @@ impl Generate<'_, '_> {
             );
         }
 
-        let options = style::render_options(args);
+        let options = style::render_options(args).with_logo(logo);
         let renderer = plan.format.renderer();
         let bytes = match renderer {
             Renderer::Raster(format) => {
@@ -228,10 +232,10 @@ fn result(plan: &Plan, input: &Input, code: &QrCode, delivered: Delivered) -> Ge
     }
 }
 
-/// The encoder options selected by the flags.
+/// The encoder options selected by the flags (the error correction level
+/// is decided with the logo, see [`logo::ec_level`]).
 fn encode_options(args: &RenderArgs) -> EncodeOptions {
     EncodeOptions::default()
-        .with_ec_level(args.ec_level)
         .with_mode(args.mode)
         .with_version(
             args.qr_version
