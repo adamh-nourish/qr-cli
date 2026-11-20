@@ -209,7 +209,7 @@ fn core_and_cli_versions_move_in_lockstep() {
 fn cli_default_margin_matches_the_core_quiet_zone() {
     let cli = <crate::Cli as clap::Parser>::try_parse_from(["qr", "x"]).unwrap();
     assert_eq!(
-        usize::from(cli.generate.render.margin),
+        usize::from(cli.generate.render.style.margin),
         qr_core::render::DEFAULT_MARGIN
     );
     assert_eq!(

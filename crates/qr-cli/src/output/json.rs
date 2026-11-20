@@ -93,8 +93,8 @@ pub struct DecodedPayload {
     pub bounds: [[i32; 2]; 4],
 }
 
-/// Why an image yielded nothing: the same code and message as the error
-/// reported on stderr.
+/// Why an image (`qr decode`) or a row (`qr batch`) yielded nothing: the
+/// same code and message as the error reported on stderr.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImageError {
     /// A stable identifier, such as `no_code_found` or `invalid_image`.
@@ -114,6 +114,67 @@ pub struct DecodeSummary {
     pub unreadable: usize,
     /// Images that were read but held no readable code.
     pub no_code: usize,
+}
+
+/// One `qr batch --json` line: what happened to one row.
+///
+/// A written row has the code's details; a failed one has `error` (and
+/// `output` when its file name was settled).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BatchRow {
+    /// The row number, from 1, not counting a header or blank lines.
+    pub row: usize,
+    /// The input line the row starts on, from 1.
+    pub line: u64,
+    /// The file written (or that would have been), `--out-dir` joined
+    /// with the name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// The code written, for a row that succeeded.
+    #[serde(flatten)]
+    pub code: Option<BatchCode>,
+    /// Why the row failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ImageError>,
+}
+
+/// The code written for one `qr batch` row; the fields mean what they do
+/// in [`Generated`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BatchCode {
+    /// The output format name, as accepted by `-f`.
+    pub format: &'static str,
+    /// The symbol version, 1 to 40.
+    pub version: u8,
+    /// The error correction level: L, M, Q or H.
+    pub ec: String,
+    /// The data mode: numeric, alphanumeric or byte.
+    pub mode: String,
+    /// The mask pattern, 0 to 7.
+    pub mask: u8,
+    /// The symbol width in modules, without the quiet zone.
+    pub modules: usize,
+    /// The number of data bytes encoded.
+    pub bytes: usize,
+    /// The number of bytes written to the file.
+    pub written: usize,
+    /// Whether the rendered code read back as the data, when it was
+    /// checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+}
+
+/// The last `qr batch --json` line, under the key `summary`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct BatchSummary {
+    /// Rows in the input.
+    pub rows: usize,
+    /// Rows written.
+    pub written: usize,
+    /// Rows that failed.
+    pub failed: usize,
+    /// Rows not tried because `--fail-fast` stopped the batch.
+    pub skipped: usize,
 }
 
 /// A diagnostic, as a one-line JSON object keyed by its kind:
@@ -215,6 +276,52 @@ mod tests {
         assert_eq!(
             keyed("warning", &w),
             "{\"warning\":{\"code\":\"w\",\"message\":\"m\",\"hint\":\"h\"}}\n"
+        );
+    }
+
+    #[test]
+    fn batch_rows_are_flat_objects() {
+        let ok = BatchRow {
+            row: 1,
+            line: 2,
+            output: Some("out/1.png".into()),
+            code: Some(BatchCode {
+                format: "png",
+                version: 1,
+                ec: "M".into(),
+                mode: "byte".into(),
+                mask: 3,
+                modules: 21,
+                bytes: 5,
+                written: 99,
+                verified: None,
+            }),
+            error: None,
+        };
+        assert_eq!(
+            object(&ok),
+            "{\"row\":1,\"line\":2,\"output\":\"out/1.png\",\"format\":\"png\",\
+             \"version\":1,\"ec\":\"M\",\"mode\":\"byte\",\"mask\":3,\"modules\":21,\
+             \"bytes\":5,\"written\":99}\n"
+        );
+        let failed = BatchRow {
+            row: 2,
+            line: 3,
+            output: None,
+            code: None,
+            error: Some(ImageError {
+                code: "empty_input",
+                message: "the data is empty".into(),
+            }),
+        };
+        assert_eq!(
+            object(&failed),
+            "{\"row\":2,\"line\":3,\"error\":{\"code\":\"empty_input\",\
+             \"message\":\"the data is empty\"}}\n"
+        );
+        assert_eq!(
+            keyed("summary", &BatchSummary::default()),
+            "{\"summary\":{\"rows\":0,\"written\":0,\"failed\":0,\"skipped\":0}}\n"
         );
     }
 

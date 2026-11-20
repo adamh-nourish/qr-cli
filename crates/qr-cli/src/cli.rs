@@ -2,8 +2,8 @@
 //!
 //! Generation is the root command (`qr [OPTIONS] [TEXT]`); subcommands
 //! build structured [`payload`]s (`qr wifi`, `qr vcard`, ...), read codes
-//! back (`qr decode`, [`DecodeArgs`]) or are tooling; a later change adds
-//! `batch`. Keeping every clap type in this module lets completions and
+//! back (`qr decode`, [`DecodeArgs`]), write many codes (`qr batch`,
+//! [`BatchArgs`]) or are tooling. Keeping every clap type in this module lets completions and
 //! the man page be generated from a single source of truth.
 
 use std::path::PathBuf;
@@ -42,6 +42,8 @@ Examples:
   qr wifi --ssid Home --password-stdin < pw.txt
                                Share a WiFi network (see 'qr wifi --help')
   qr decode code.png           Print the data held in an image's QR codes
+  qr batch urls.csv --out-dir codes
+                               Write one PNG per CSV row (see 'qr batch --help')
   qr -- wifi                   Encode a word that is also a command name,
                                such as 'wifi', 'url', 'email' or 'help'
 
@@ -89,6 +91,7 @@ impl Cli {
     pub fn json(&self) -> bool {
         match &self.command {
             Some(Command::Decode(decode)) => decode.json,
+            Some(Command::Batch(batch)) => batch.json,
             _ => self.render_args().json,
         }
     }
@@ -105,6 +108,9 @@ pub enum Command {
     Payload(PayloadCommand),
     /// Read the QR codes in PNG, JPEG or WebP images and print their data.
     Decode(DecodeArgs),
+    /// Write one code per row of a CSV file (or per line of a text file)
+    /// into a directory.
+    Batch(BatchArgs),
     /// Print a shell completion script to stdout.
     Completions {
         /// The shell to generate completions for.
@@ -145,7 +151,6 @@ pub struct GenerateArgs {
 /// Options that control how a code is encoded, drawn and written. The
 /// default command and every payload subcommand share them.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
-#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
 pub struct RenderArgs {
     /// Write the code to PATH ('-' for stdout, not /dev/stdout). Existing
     /// files are replaced atomically and keep their permissions; a symlink
@@ -158,6 +163,31 @@ pub struct RenderArgs {
     #[arg(short = 'f', long = "format", value_enum, value_name = "FORMAT")]
     pub format: Option<OutputFormat>,
 
+    /// How the code is encoded and drawn.
+    #[command(flatten)]
+    pub style: StyleArgs,
+
+    /// Print the image as a base64 data: URI instead of raw bytes
+    /// [default format: svg]. With -o, the file holds the URI: use a .txt
+    /// name.
+    #[arg(long)]
+    pub data_uri: bool,
+
+    /// Fail instead of replacing an existing -o file.
+    #[arg(long, requires = "output")]
+    pub no_clobber: bool,
+
+    /// Print a JSON result object on stdout and JSON errors on stderr.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// How a code is encoded and drawn: error correction, version, mode and
+/// mask, then size, colours, shape, logo and the read-back check. Shared by
+/// [`RenderArgs`] (one code) and [`BatchArgs`] (one code per row).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
+pub struct StyleArgs {
     /// Error correction level: L, M, Q or H [default: M; H with --logo].
     #[arg(long = "ec", value_name = "LEVEL", value_parser = EcLevel::from_str)]
     pub ec_level: Option<EcLevel>,
@@ -254,20 +284,6 @@ pub struct RenderArgs {
     /// Skip the automatic read-back check.
     #[arg(long, overrides_with = "verify")]
     pub no_verify: bool,
-
-    /// Print the image as a base64 data: URI instead of raw bytes
-    /// [default format: svg]. With -o, the file holds the URI: use a .txt
-    /// name.
-    #[arg(long)]
-    pub data_uri: bool,
-
-    /// Fail instead of replacing an existing -o file.
-    #[arg(long, requires = "output")]
-    pub no_clobber: bool,
-
-    /// Print a JSON result object on stdout and JSON errors on stderr.
-    #[arg(long)]
-    pub json: bool,
 }
 
 const DECODE_AFTER_HELP: &str = "\
@@ -308,6 +324,109 @@ pub struct DecodeArgs {
     /// terminal, where the data could send escape sequences.
     #[arg(long)]
     pub raw: bool,
+}
+
+const BATCH_AFTER_HELP: &str = "\
+Input: a CSV file whose first row is a header when one of its cells is
+'data' (that column is encoded; a 'filename' column names the files), or
+without a header, data in the first column and a file name in the second.
+With --lines, every non-blank line is one code. At most 50 MiB, 100000
+rows and 1000 cells per row; a UTF-8 byte order mark is ignored.
+
+File names: --name is a template [default: {filename} when there is a
+filename column, otherwise the row number] with the fields {n:04} (the
+row number padded to 4 digits; 'n' alone in braces does not pad it),
+{hash} (16 hex digits of the data), {data}, {filename} and, with a
+header, any column by name. {data} puts the data itself in the name, so
+avoid it for secrets such as WiFi passwords or URL tokens. Field values
+lose path separators, ':', control characters and leading '.' or '-';
+Windows device names (CON, NUL, COM1, ...) are refused; names are cut at
+200 bytes, must be unique ignoring case and Unicode normalization, and
+get the format's extension. Every file stays directly inside --out-dir.
+
+Existing files are never replaced without --force. A row that fails is
+reported and the rest are still written, unless --fail-fast; the exit
+status is then that of the first failed row. Each file is written
+atomically but not flushed to disk one by one. Styled codes (--logo,
+--shape, colours) are read back automatically, about a fifth of the
+batch time; --no-verify skips that for large runs.
+
+Examples:
+  qr batch urls.csv --out-dir codes
+                               One PNG per row, named from the CSV
+  qr batch urls.txt --lines --out-dir codes --name 'url-{n:04}' -f svg
+                               One SVG per line: url-0001.svg, ...
+  qr batch rows.csv --out-dir out --json > report.ndjson
+                               One JSON object per row, then a summary";
+
+/// Options for `qr batch`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(after_help = BATCH_AFTER_HELP)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
+pub struct BatchArgs {
+    /// CSV file to read, or with --lines a text file; '-' reads stdin.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// Directory to write the codes in (created if it does not exist).
+    #[arg(long, value_name = "DIR")]
+    pub out_dir: PathBuf,
+
+    /// Read one item per line instead of CSV (blank lines are skipped).
+    #[arg(long, conflicts_with = "no_header")]
+    pub lines: bool,
+
+    /// The CSV has no header: the first row is data even if a cell says
+    /// 'data'.
+    #[arg(long)]
+    pub no_header: bool,
+
+    /// File name template, without the extension (see below).
+    #[arg(long, value_name = "TEMPLATE")]
+    pub name: Option<String>,
+
+    /// Output format [default: png]; text and ascii write .txt files.
+    #[arg(short = 'f', long = "format", value_name = "FORMAT", value_parser = file_format())]
+    pub format: Option<OutputFormat>,
+
+    /// How each code is encoded and drawn.
+    #[command(flatten)]
+    pub style: StyleArgs,
+
+    /// Worker threads [default: the number of CPUs].
+    #[arg(
+        short = 'j',
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u16).range(1..=i64::from(crate::batch::MAX_JOBS))
+    )]
+    pub jobs: Option<u16>,
+
+    /// Stop at the first row that fails (rows already started finish).
+    #[arg(long)]
+    pub fail_fast: bool,
+
+    /// Replace files that already exist in --out-dir.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print one JSON object per row and then a summary on stdout (NDJSON),
+    /// and JSON errors on stderr.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// The `-f` values `qr batch` accepts: every format but `terminal`, which
+/// is not a file format.
+fn file_format() -> impl clap::builder::TypedValueParser<Value = OutputFormat> {
+    use clap::builder::TypedValueParser as _;
+
+    let values = OutputFormat::value_variants()
+        .iter()
+        .filter(|format| **format != OutputFormat::Terminal)
+        .filter_map(ValueEnum::to_possible_value);
+    clap::builder::PossibleValuesParser::new(values)
+        .try_map(|name| <OutputFormat as ValueEnum>::from_str(&name, false))
 }
 
 /// Options shared by every command.
@@ -403,15 +522,18 @@ mod tests {
         assert_eq!(cli.generate.text.as_deref(), Some("x"));
         assert!(!cli.generate.keep_newline);
         assert_eq!(cli.generate.input, None);
-        let g = cli.render_args().clone();
+        let r = cli.render_args().clone();
+        assert_eq!((r.output, r.format), (None, None));
+        assert!(!(r.data_uri || r.no_clobber || r.json));
+        let g = r.style;
         assert_eq!(g.ec_level, None);
         assert_eq!((g.logo, g.logo_scale), (None, None));
         assert_eq!(g.mode, ModeChoice::Auto);
         assert_eq!(g.margin, 4);
-        assert_eq!((g.qr_version, g.mask, g.format), (None, None, None));
-        assert_eq!((g.output, g.scale, g.fg, g.bg), (None, None, None, None));
+        assert_eq!((g.qr_version, g.mask), (None, None));
+        assert_eq!((g.scale, g.fg, g.bg), (None, None, None));
         assert_eq!((g.size, g.dpi), (None, None));
-        assert!(!(g.transparent || g.invert || g.data_uri || g.no_clobber || g.json));
+        assert!(!(g.transparent || g.invert));
         assert_eq!(g.shape, Shape::Square);
         assert!(!(g.verify || g.no_verify));
         assert_eq!(cli.global.color, ColorChoice::Auto);
@@ -446,7 +568,7 @@ mod tests {
             Some(std::path::Path::new("w.png"))
         );
         assert_eq!(
-            (render.shape, render.ec_level),
+            (render.style.shape, render.style.ec_level),
             (Shape::Dots, Some(EcLevel::H))
         );
         assert!(!wifi.output.print_payload);
@@ -526,6 +648,84 @@ mod tests {
     }
 
     #[test]
+    fn batch_takes_a_file_a_directory_and_the_style_flags() {
+        let cli = Cli::try_parse_from([
+            "qr",
+            "batch",
+            "rows.csv",
+            "--out-dir",
+            "out",
+            "--name",
+            "{n:04}",
+            "-f",
+            "svg",
+            "-j",
+            "3",
+            "--fail-fast",
+            "--force",
+            "--json",
+            "--shape",
+            "dots",
+            "--ec",
+            "H",
+        ])
+        .unwrap();
+        let Some(Command::Batch(batch)) = &cli.command else {
+            panic!("expected batch: {:?}", cli.command);
+        };
+        assert_eq!(batch.file, PathBuf::from("rows.csv"));
+        assert_eq!(batch.out_dir, PathBuf::from("out"));
+        assert_eq!(batch.name.as_deref(), Some("{n:04}"));
+        assert_eq!(batch.format, Some(OutputFormat::Svg));
+        assert_eq!(batch.jobs, Some(3));
+        assert!(batch.fail_fast && batch.force && batch.json && cli.json());
+        assert!(!(batch.lines || batch.no_header));
+        assert_eq!(
+            (batch.style.shape, batch.style.ec_level),
+            (Shape::Dots, Some(EcLevel::H))
+        );
+        // --out-dir is required; --lines and --no-header do not mix; the
+        // one-code output flags do not exist here.
+        for (args, kind) in [
+            (
+                &["qr", "batch", "f"][..],
+                clap::error::ErrorKind::MissingRequiredArgument,
+            ),
+            (
+                &[
+                    "qr",
+                    "batch",
+                    "f",
+                    "--out-dir",
+                    "o",
+                    "--lines",
+                    "--no-header",
+                ],
+                clap::error::ErrorKind::ArgumentConflict,
+            ),
+            (
+                &["qr", "batch", "f", "--out-dir", "o", "-o", "x.png"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["qr", "batch", "f", "--out-dir", "o", "--data-uri"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["qr", "batch", "f", "--out-dir", "o", "--jobs", "0"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                &["qr", "batch", "f", "--out-dir", "o", "--jobs", "257"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+        ] {
+            let err = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(err.kind(), kind, "{args:?}");
+        }
+    }
+
+    #[test]
     fn text_and_input_file_conflict() {
         let err = Cli::try_parse_from(["qr", "x", "-i", "f"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
@@ -552,9 +752,9 @@ mod tests {
         let g = cli.generate.render;
         assert_eq!(g.output.as_deref(), Some(std::path::Path::new("a.svg")));
         assert_eq!(g.format, Some(OutputFormat::Jpeg));
-        assert_eq!(g.scale, Some(3));
-        assert_eq!(g.fg, Some(Color::rgb(0, 0, 0x80)));
-        assert_eq!(g.bg, Some(Color::rgba(255, 255, 255, 0x88)));
+        assert_eq!(g.style.scale, Some(3));
+        assert_eq!(g.style.fg, Some(Color::rgb(0, 0, 0x80)));
+        assert_eq!(g.style.bg, Some(Color::rgba(255, 255, 255, 0x88)));
         assert!(g.no_clobber);
     }
 
@@ -562,7 +762,10 @@ mod tests {
     fn size_and_dpi_parse_and_size_conflicts_with_scale() {
         let cli = Cli::try_parse_from(["qr", "--size", "512", "--dpi", "300", "x"]).unwrap();
         assert_eq!(
-            (cli.generate.render.size, cli.generate.render.dpi),
+            (
+                cli.generate.render.style.size,
+                cli.generate.render.style.dpi
+            ),
             (Some(512), Some(300))
         );
         let err = Cli::try_parse_from(["qr", "--size", "512", "--scale", "4", "x"]).unwrap_err();
@@ -571,7 +774,7 @@ mod tests {
 
     #[test]
     fn shape_and_verify_flags_parse() {
-        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().generate.render;
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().generate.render.style;
         let g = parse(&["qr", "--shape", "dots", "x"]);
         assert_eq!(g.shape, Shape::Dots);
         assert_eq!(ModuleShape::from(g.shape), ModuleShape::Dots);
@@ -590,7 +793,7 @@ mod tests {
     fn logo_flags_parse() {
         let cli =
             Cli::try_parse_from(["qr", "--logo", "l.png", "--logo-scale", "0.3", "x"]).unwrap();
-        let g = cli.generate.render;
+        let g = cli.generate.render.style;
         assert_eq!(g.logo.as_deref(), Some(std::path::Path::new("l.png")));
         assert_eq!(g.logo_scale, Some(LogoScale::MAX));
         // The scale needs a logo and a value in range.

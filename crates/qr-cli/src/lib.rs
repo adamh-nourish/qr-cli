@@ -10,6 +10,8 @@
 //! - [`input`]: input resolution and bounded reads;
 //! - `payload`: the structured payload subcommands (`qr wifi`, ...);
 //! - `decode`: `qr decode`, reading codes back from images;
+//! - [`batch`]: `qr batch`, one code per row of a CSV or text file, on a
+//!   thread pool that only this command starts;
 //! - [`output`]: output format resolution, atomic file writes, `data:`
 //!   URIs and the `--json` objects;
 //! - `style` and `verify`: colour and shape options, contrast warnings and
@@ -21,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod batch;
 pub mod cli;
 mod decode;
 pub mod diag;
@@ -43,6 +46,7 @@ use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{CommandFactory as _, Parser as _, Subcommand as _};
 use qr_core::{sanitize_for_terminal, sanitize_lines_for_terminal};
 
+use crate::batch::Batch;
 pub use crate::cli::Cli;
 use crate::cli::{Command, PayloadCommand};
 use crate::decode::Decode;
@@ -115,6 +119,14 @@ where
         Some(Command::Completions { shell }) => done(tooling::completions(*shell, &mut **stdout)),
         Some(Command::Man) => done(tooling::man(&mut **stdout)),
         Some(Command::Decode(args)) => Decode {
+            args,
+            env,
+            stdin: &mut **stdin,
+            stdout: &mut **stdout,
+            reporter: &mut reporter,
+        }
+        .run(),
+        Some(Command::Batch(args)) => Batch {
             args,
             env,
             stdin: &mut **stdin,

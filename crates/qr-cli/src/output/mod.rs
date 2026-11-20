@@ -20,7 +20,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub use self::format::{Renderer, known_extensions};
-pub use self::write::{WriteError, precheck, write_atomic};
+pub use self::write::{Durability, WriteError, precheck, write_atomic, write_atomic_with};
 use crate::cli::{OutputFormat, RenderArgs};
 use crate::diag::Reporter;
 use crate::error::CliError;

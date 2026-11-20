@@ -81,6 +81,37 @@ pub fn precheck(path: &Path, no_clobber: bool) -> Result<(), WriteError> {
 /// [`WriteError::Io`] for any other failure. On error the destination is
 /// unchanged and the temporary file is removed.
 pub fn write_atomic(path: &Path, bytes: &[u8], no_clobber: bool) -> Result<(), WriteError> {
+    write_atomic_with(path, bytes, no_clobber, Durability::Synced)
+}
+
+/// Whether [`write_atomic_with`] waits for the data to reach the disk
+/// before the rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Flush the file to stable storage before renaming it into place, so
+    /// even a power cut leaves the old file or the complete new one. This
+    /// is what `-o` does. On macOS it is a full flush of the drive cache
+    /// (`F_FULLFSYNC`), which costs milliseconds per file.
+    Synced,
+    /// Rename without waiting for the disk. Readers still never see a
+    /// partial file, but after a power cut or kernel panic a just-written
+    /// file may be empty. `qr batch` writes this way: its files can be
+    /// regenerated, and a flush per file would cap it at a few hundred
+    /// files a second.
+    Unsynced,
+}
+
+/// [`write_atomic`] with a choice of [`Durability`].
+///
+/// # Errors
+///
+/// As for [`write_atomic`].
+pub fn write_atomic_with(
+    path: &Path,
+    bytes: &[u8],
+    no_clobber: bool,
+    durability: Durability,
+) -> Result<(), WriteError> {
     let io_error = |error| WriteError::Io {
         path: path.to_owned(),
         error,
@@ -88,7 +119,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8], no_clobber: bool) -> Result<(), W
     let mut file = temp_file_beside(path).map_err(io_error)?;
     file.write_all(bytes)
         .and_then(|()| file.flush())
-        .and_then(|()| file.as_file().sync_all())
+        .and_then(|()| match durability {
+            Durability::Synced => file.as_file().sync_all(),
+            Durability::Unsynced => Ok(()),
+        })
         .map_err(io_error)?;
     let persisted = if no_clobber {
         file.persist_noclobber(path)
@@ -163,6 +197,18 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"one");
         write_atomic(&path, b"two", false).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"two");
+        assert_eq!(temp_files(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn unsynced_writes_are_still_atomic_and_no_clobber() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.png");
+        write_atomic_with(&path, b"one", true, Durability::Unsynced).unwrap();
+        let err = write_atomic_with(&path, b"two", true, Durability::Unsynced).unwrap_err();
+        assert!(matches!(err, WriteError::Exists(_)), "{err}");
+        write_atomic_with(&path, b"three", false, Durability::Unsynced).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"three");
         assert_eq!(temp_files(dir.path()), Vec::<String>::new());
     }
 

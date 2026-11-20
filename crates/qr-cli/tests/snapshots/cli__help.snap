@@ -18,6 +18,7 @@ Commands:
   geo          Encode a location (a geo: link)
   event        Encode a calendar event (iCalendar)
   decode       Read the QR codes in PNG, JPEG or WebP images and print their data
+  batch        Write one code per row of a CSV file (or per line of a text file) into a directory
   completions  Print a shell completion script to stdout
   man          Print the man page (roff) to stdout
   help         Print this message or the help of the given subcommand(s)
@@ -167,6 +168,8 @@ Examples:
   qr wifi --ssid Home --password-stdin < pw.txt
                                Share a WiFi network (see 'qr wifi --help')
   qr decode code.png           Print the data held in an image's QR codes
+  qr batch urls.csv --out-dir codes
+                               Write one PNG per CSV row (see 'qr batch --help')
   qr -- wifi                   Encode a word that is also a command name,
                                such as 'wifi', 'url', 'email' or 'help'
 

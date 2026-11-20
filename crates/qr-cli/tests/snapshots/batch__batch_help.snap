@@ -1,0 +1,169 @@
+---
+source: crates/qr-cli/tests/batch.rs
+expression: help
+---
+Write one code per row of a CSV file (or per line of a text file) into a directory
+
+Usage: qr batch [OPTIONS] --out-dir <DIR> <FILE>
+
+Arguments:
+  <FILE>
+          CSV file to read, or with --lines a text file; '-' reads stdin
+
+Options:
+      --out-dir <DIR>
+          Directory to write the codes in (created if it does not exist)
+
+      --lines
+          Read one item per line instead of CSV (blank lines are skipped)
+
+      --no-header
+          The CSV has no header: the first row is data even if a cell says 'data'
+
+      --name <TEMPLATE>
+          File name template, without the extension (see below)
+
+  -f, --format <FORMAT>
+          Output format [default: png]; text and ascii write .txt files
+
+          Possible values:
+          - text:  Unicode half blocks with no escape sequences
+          - ascii: '##' and spaces, pure ASCII
+          - png:   PNG image (1-bit indexed, or RGBA when transparent)
+          - svg:   Scalable Vector Graphics
+          - jpeg:  JPEG image (quality 92; at least 4 pixels per module)
+          - webp:  Lossless WebP image
+          - pdf:   One-page vector PDF
+          - eps:   Encapsulated PostScript
+
+      --ec <LEVEL>
+          Error correction level: L, M, Q or H [default: M; H with --logo]
+
+      --qr-version <N>
+          Smallest symbol version to use, 1 to 40 (larger data still grows it)
+
+      --mode <MODE>
+          Data mode: auto, numeric, alnum or byte
+          
+          [default: auto]
+
+      --mask <N>
+          Force mask pattern 0 to 7 instead of picking one automatically
+
+      --margin <N>
+          Quiet zone around the code, in modules (below 4 may not scan)
+          
+          [default: 4]
+
+      --scale <N>
+          Size of one module in pixels (PNG, JPEG, WebP, SVG) or points (PDF, EPS) [default: 10]
+
+      --size <PX>
+          Width and height of a PNG, JPEG or WebP image in pixels, with the largest whole module
+          size that fits (vector formats are at most this size)
+
+      --dpi <N>
+          Pixel density to record in a PNG or JPEG file, in dots per inch
+
+      --fg <COLOR>
+          Colour of dark modules: #RGB, #RRGGBB, #RRGGBBAA or a CSS name [default: black]
+
+      --bg <COLOR>
+          Colour of light modules and the quiet zone [default: white]
+
+      --transparent
+          Leave the background unpainted (image formats only)
+
+      --invert
+          Swap dark and light modules (or --fg and --bg for images)
+
+      --shape <SHAPE>
+          How dark modules are drawn in png, jpeg, webp, svg, pdf and eps output; the three finder
+          patterns stay square
+
+          Possible values:
+          - square:  Full squares: the standard look
+          - rounded: Squares with their exposed corners rounded
+          - dots:    Circles
+          
+          [default: square]
+
+      --logo <FILE>
+          Draw a PNG, JPEG or WebP image (at most 10 MiB and 8192x8192) over the centre of a png,
+          jpeg, webp or svg code. Sets --ec H (a lower --ec is overridden with a warning) and checks
+          the code reads back
+
+      --logo-scale <FRACTION>
+          Width of the --logo as a fraction of the code's width, 0.05 to 0.3 [default: 0.2]
+
+      --verify
+          Read the rendered code back with a decoder and fail (exit 6) unless it holds the input.
+          Automatic for images with a --logo or a non-default --shape/--fg/--bg, --transparent or
+          --invert. Text output is checked as a plain module grid (the symbol, not the characters)
+
+      --no-verify
+          Skip the automatic read-back check
+
+  -j, --jobs <N>
+          Worker threads [default: the number of CPUs]
+
+      --fail-fast
+          Stop at the first row that fails (rows already started finish)
+
+      --force
+          Replace files that already exist in --out-dir
+
+      --json
+          Print one JSON object per row and then a summary on stdout (NDJSON), and JSON errors on
+          stderr
+
+      --color <WHEN>
+          When to use colour; NO_COLOR and CLICOLOR_FORCE are honoured in auto
+
+          Possible values:
+          - auto:   Colour when writing to a terminal, unless the environment says not to
+          - always: Always colour
+          - never:  Never colour
+          
+          [default: auto]
+
+  -q, --quiet
+          Print errors only, no warnings
+
+  -v, --verbose
+          Also print details on stderr (what was encoded, or decoded, and how)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Input: a CSV file whose first row is a header when one of its cells is
+'data' (that column is encoded; a 'filename' column names the files), or
+without a header, data in the first column and a file name in the second.
+With --lines, every non-blank line is one code. At most 50 MiB, 100000
+rows and 1000 cells per row; a UTF-8 byte order mark is ignored.
+
+File names: --name is a template [default: {filename} when there is a
+filename column, otherwise the row number] with the fields {n:04} (the
+row number padded to 4 digits; 'n' alone in braces does not pad it),
+{hash} (16 hex digits of the data), {data}, {filename} and, with a
+header, any column by name. {data} puts the data itself in the name, so
+avoid it for secrets such as WiFi passwords or URL tokens. Field values
+lose path separators, ':', control characters and leading '.' or '-';
+Windows device names (CON, NUL, COM1, ...) are refused; names are cut at
+200 bytes, must be unique ignoring case and Unicode normalization, and
+get the format's extension. Every file stays directly inside --out-dir.
+
+Existing files are never replaced without --force. A row that fails is
+reported and the rest are still written, unless --fail-fast; the exit
+status is then that of the first failed row. Each file is written
+atomically but not flushed to disk one by one. Styled codes (--logo,
+--shape, colours) are read back automatically, about a fifth of the
+batch time; --no-verify skips that for large runs.
+
+Examples:
+  qr batch urls.csv --out-dir codes
+                               One PNG per row, named from the CSV
+  qr batch urls.txt --lines --out-dir codes --name 'url-{n:04}' -f svg
+                               One SVG per line: url-0001.svg, ...
+  qr batch rows.csv --out-dir out --json > report.ndjson
+                               One JSON object per row, then a summary

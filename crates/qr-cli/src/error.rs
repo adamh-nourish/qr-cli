@@ -9,6 +9,7 @@ use qr_core::payload::PayloadError;
 use qr_core::verify::VerifyError;
 use qr_core::{EcLevel, EncodeError, RenderError};
 
+use crate::batch::BatchError;
 use crate::cli::OutputFormat;
 use crate::exit::ExitStatus;
 use crate::input::InputSource;
@@ -199,6 +200,10 @@ pub enum CliError {
         undecodable: usize,
     },
 
+    /// A `qr batch` problem.
+    #[error(transparent)]
+    Batch(#[from] BatchError),
+
     /// A bug: something that should be impossible happened.
     #[error("internal error: {0}")]
     Internal(String),
@@ -217,6 +222,7 @@ impl CliError {
     /// The exit status that this error maps to.
     pub const fn exit_status(&self) -> ExitStatus {
         match self {
+            Self::Batch(error) => error.exit_status(),
             Self::StdinIsTerminal
             | Self::SecretStdinIsTerminal
             | Self::Payload(_)
@@ -267,6 +273,7 @@ impl CliError {
     /// A stable machine-readable name for the error, used by `--json`.
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::Batch(error) => error.code(),
             Self::StdinIsTerminal | Self::SecretStdinIsTerminal | Self::ImageStdinIsTerminal => {
                 "no_input"
             }
@@ -310,8 +317,11 @@ impl CliError {
     }
 
     /// One actionable suggestion for the user, if there is one.
+    // One arm per error: splitting the table would scatter the hints.
+    #[allow(clippy::too_many_lines)]
     pub fn hint(&self) -> Option<String> {
         match self {
+            Self::Batch(error) => error.hint(),
             Self::StdinIsTerminal | Self::EmptyInput { .. } => {
                 Some("pass TEXT, pipe data to stdin or use -i FILE (see 'qr --help')".to_owned())
             }
@@ -491,11 +501,12 @@ fn is_vector(path: &std::path::Path) -> bool {
 /// directory (os error 2)"), which breaks the lowercase message style, so
 /// common kinds get fixed wording. Anything else keeps its own text with
 /// the first letter lowered.
-fn io_reason(error: &io::Error) -> String {
+pub(crate) fn io_reason(error: &io::Error) -> String {
     let fixed = match error.kind() {
         io::ErrorKind::NotFound => "no such file or directory",
         io::ErrorKind::PermissionDenied => "permission denied",
         io::ErrorKind::IsADirectory => "it is a directory",
+        io::ErrorKind::NotADirectory => "it is not a directory",
         io::ErrorKind::BrokenPipe => "the pipe was closed",
         io::ErrorKind::InvalidData => "the data is invalid",
         io::ErrorKind::Interrupted => "the operation was interrupted",
@@ -878,6 +889,7 @@ mod tests {
             (io::ErrorKind::NotFound, "no such file or directory"),
             (io::ErrorKind::PermissionDenied, "permission denied"),
             (io::ErrorKind::IsADirectory, "it is a directory"),
+            (io::ErrorKind::NotADirectory, "it is not a directory"),
             (io::ErrorKind::BrokenPipe, "the pipe was closed"),
             (io::ErrorKind::InvalidData, "the data is invalid"),
             (io::ErrorKind::Interrupted, "the operation was interrupted"),
