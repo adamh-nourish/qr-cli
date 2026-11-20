@@ -231,6 +231,8 @@ Engineer **A** owns core and rendering. Engineer **B** owns CLI, I/O and infrast
 
 PR 8b exceeds the §9 risk 6 guideline of about 400 changed lines (about 2,300 changed lines after review; about 1,000 outside tests, snapshots and in-file test modules, including the 165-line `fast_qr` backend it deletes). It is kept as one PR because the parts are not useful alone. Segment-aware `plan()` without the backend would plan segments that `fast_qr` cannot encode, since `fast_qr` takes one mode. Swapping the backend without segmentation would ship the PR 2 size regression. The format-information reader exists only because `qrcode` does not report its mask. Most of the remaining lines are tests: differential, capacity, mask penalty and round trip.
 
+**README split out of PR 12:** the table row above puts the README in the release-pipeline PR. It is its own PR instead, GitHub #15 (branch `pr/14-readme`, stacked on the release pipeline in `pr/13-release`).
+
 **How the stack is merged:**
 - Squash-merge from the bottom up.
 - After each merge, `gh pr edit --base main` the next PR and rebase it.
