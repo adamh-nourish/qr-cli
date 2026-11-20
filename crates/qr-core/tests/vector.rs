@@ -80,7 +80,7 @@ impl Grid {
 /// Asserts the DECISIONS §4.4 rules on a parsed SVG and returns it.
 fn assert_safe_svg(svg: &str) -> roxmltree::Document<'_> {
     let doc = roxmltree::Document::parse(svg).expect("SVG is not well-formed XML");
-    let allowed = ["svg", "title", "rect", "path"];
+    let allowed = ["svg", "title", "rect", "path", "image"];
     for node in doc.descendants().filter(roxmltree::Node::is_element) {
         let name = node.tag_name().name();
         assert!(allowed.contains(&name), "unexpected element <{name}>");
@@ -91,7 +91,19 @@ fn assert_safe_svg(svg: &str) -> roxmltree::Document<'_> {
         for attr in node.attributes() {
             let attr_name = attr.name().to_ascii_lowercase();
             assert!(!attr_name.starts_with("on"), "event attribute {attr_name}");
-            assert!(!attr_name.contains("href"), "href attribute {attr_name}");
+            if attr_name.contains("href") {
+                // Only a logo's embedded PNG: never an external reference.
+                assert_eq!((name, attr_name.as_str()), ("image", "href"));
+                let data = attr
+                    .value()
+                    .strip_prefix("data:image/png;base64,")
+                    .expect("href is not an embedded PNG");
+                assert!(
+                    data.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)),
+                    "href is not base64"
+                );
+            }
             assert!(
                 attr.namespace().is_none(),
                 "namespaced attribute {attr_name}"
@@ -107,7 +119,10 @@ fn assert_safe_svg(svg: &str) -> roxmltree::Document<'_> {
             );
         }
     }
-    for forbidden in ["script", "foreignObject", "image", "use", "style", "a"] {
+    if let Some(image) = doc.descendants().find(|n| n.tag_name().name() == "image") {
+        assert!(image.attribute("href").is_some(), "an <image> without data");
+    }
+    for forbidden in ["script", "foreignObject", "use", "style", "a"] {
         assert!(
             doc.descendants().all(|n| n.tag_name().name() != forbidden),
             "<{forbidden}> present"
@@ -346,6 +361,37 @@ fn render_vector_matches_the_typed_renderers() {
                 eps_grid(std::str::from_utf8(&bytes).unwrap());
             }
         }
+    }
+}
+
+#[test]
+fn a_logo_is_embedded_data_and_nothing_else() {
+    use qr_core::loader::Bitmap;
+    use qr_core::logo::Logo;
+    let code = encode(b"logo", &EncodeOptions::default()).unwrap();
+    // Pixels that spell markup, in case anything copied them through.
+    let pixels: Vec<u8> = b"<script>alert(1)</script>\"'&"
+        .iter()
+        .copied()
+        .cycle()
+        .take(6 * 5 * 4)
+        .collect();
+    let logo = Logo::new(Bitmap::from_rgba(6, 5, pixels).unwrap());
+    for shape in ModuleShape::ALL {
+        let options = RenderOptions::default()
+            .with_shape(shape)
+            .with_title("\"><image href='https://evil.example/x.png'/>")
+            .with_transparent(true)
+            .with_logo(Some(logo.clone()));
+        let svg = render_svg(code.matrix(), &options).unwrap();
+        let doc = assert_safe_svg(&svg);
+        let images = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("image"))
+            .count();
+        assert_eq!(images, 1, "{svg}");
+        assert!(!svg.contains("evil.example/x.png'/>"), "{svg}");
+        assert!(!svg.contains("<script"), "{svg}");
     }
 }
 

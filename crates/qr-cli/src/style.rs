@@ -30,11 +30,12 @@ pub(crate) fn render_options(args: &RenderArgs) -> RenderOptions {
         .with_shape(args.shape.into())
 }
 
-/// Whether the image departs from plain black squares on white: a module
-/// shape, a colour, transparency or `--invert`. Such images are verified
-/// automatically (DECISIONS section 3).
+/// Whether the image departs from plain black squares on white: a logo,
+/// a module shape, a colour, transparency or `--invert`. Such images are
+/// verified automatically (DECISIONS section 3).
 pub(crate) fn is_styled(options: &RenderOptions) -> bool {
-    options.shape != ModuleShape::Square
+    options.logo.is_some()
+        || options.shape != ModuleShape::Square
         || options.fg != Color::BLACK
         || options.bg != Color::WHITE
         || options.transparent
@@ -136,6 +137,9 @@ mod tests {
         assert!(!is_styled(&o));
         assert!(is_styled(&render_options(&args(&["--transparent"]))));
         assert!(is_styled(&render_options(&args(&["--bg", "ivory"]))));
+        let image = qr_core::loader::Bitmap::from_rgba(1, 1, vec![0, 0, 0, 255]).unwrap();
+        let logo = qr_core::logo::Logo::new(image);
+        assert!(is_styled(&RenderOptions::default().with_logo(Some(logo))));
     }
 
     #[test]

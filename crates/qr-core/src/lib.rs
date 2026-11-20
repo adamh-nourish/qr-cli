@@ -5,9 +5,11 @@
 //! [`Color`], the text, vector (SVG, PDF, EPS) and raster (PNG, JPEG,
 //! WebP) [`render`]ers with their [`ModuleShape`]s, colour [`Contrast`],
 //! read-back [`verify`]cation with `rqrr`, structured [`payload`]
-//! builders (WiFi, vCard, `mailto:`, iCalendar and more) and
-//! [`sanitize_for_terminal`]. A later change adds logos. The `qr-cli`
-//! crate owns argument parsing, files, streams and exit codes.
+//! builders (WiFi, vCard, `mailto:`, iCalendar and more),
+//! [`sanitize_for_terminal`], [`logo`] overlays and the bounded image
+//! [`loader`] they (and later `qr decode`) read images with. The `qr-cli`
+//! crate owns argument parsing, files, streams and exit codes; the loader
+//! takes a reader and never opens a path itself.
 //!
 //! ```
 //! use qr_core::{EcLevel, EncodeOptions, encode};
@@ -25,6 +27,8 @@ mod color;
 mod contrast;
 mod encode;
 mod error;
+pub mod loader;
+pub mod logo;
 mod matrix;
 mod options;
 pub mod payload;

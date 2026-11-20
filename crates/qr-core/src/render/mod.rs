@@ -9,6 +9,7 @@
 //! from the typed [`Color`](crate::Color), SVG is built by a typed XML writer
 //! that escapes every value, and PDF and PostScript strings are escaped.
 
+mod data_uri;
 mod eps;
 mod escape;
 mod options;
@@ -22,6 +23,7 @@ mod text;
 mod vector;
 mod xml;
 
+pub use self::data_uri::{base64, data_uri};
 pub use self::eps::render_eps;
 pub use self::options::{
     DEFAULT_SCALE, MAX_CANVAS_SIDE, MAX_DPI, MAX_TITLE_CHARS, RenderError, RenderOptions,

@@ -12,6 +12,7 @@
 mod canvas;
 mod grey;
 mod jpeg;
+mod logo;
 mod paint;
 mod png;
 mod webp;
@@ -19,11 +20,15 @@ mod webp;
 use std::fmt;
 use std::str::FromStr;
 
+use self::canvas::Canvas;
 pub(crate) use self::grey::{GreyImage, GreyRows, luma};
 pub use self::jpeg::render_jpeg;
+use self::logo::LogoLayer;
 pub use self::png::render_png;
 pub use self::webp::render_webp;
 use super::options::{RenderError, RenderOptions};
+use crate::color::Color;
+use crate::logo::Planned;
 use crate::matrix::Matrix;
 
 /// The most pixels a raster image may hold: 256 megapixels, a 16,000-pixel
@@ -137,6 +142,52 @@ pub fn render_raster(
         RasterFormat::Png => render_png(matrix, options),
         RasterFormat::Jpeg => render_jpeg(matrix, options),
         RasterFormat::Webp => render_webp(matrix, options),
+    }
+}
+
+/// A canvas and, with a logo, the layer painted over it.
+pub(crate) struct Picture<'m> {
+    pub(crate) canvas: Canvas<'m>,
+    pub(crate) layer: Option<LogoLayer>,
+}
+
+impl<'m> Picture<'m> {
+    /// The picture of `matrix` (or of `plan`'s cleared matrix, with the
+    /// logo over it) whose light pixels are `light`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`RenderError`] from [`Canvas::new`] or [`LogoLayer::new`].
+    pub(crate) fn new(
+        matrix: &'m Matrix,
+        plan: Option<&'m Planned<'_>>,
+        options: &RenderOptions,
+        light: Color,
+        format: &'static str,
+        min_scale: u32,
+    ) -> Result<Self, RenderError> {
+        let Some(plan) = plan else {
+            let canvas = Canvas::new(matrix, options, format, min_scale)?;
+            return Ok(Self {
+                canvas,
+                layer: None,
+            });
+        };
+        let canvas = Canvas::new(&plan.matrix, options, format, min_scale)?;
+        let layer = LogoLayer::new(plan, &canvas, light, format)?;
+        Ok(Self {
+            canvas: canvas.with_fresh_rows(layer.rows()),
+            layer: Some(layer),
+        })
+    }
+
+    /// Replaces `out` with row `y` as colours: the modules in `light` and
+    /// `dark`, then the logo over them.
+    pub(crate) fn fill_colors(&self, y: u32, light: Color, dark: Color, out: &mut Vec<Color>) {
+        self.canvas.fill_row(y, light, dark, out);
+        if let Some(layer) = &self.layer {
+            layer.paint(y, out, |c| c);
+        }
     }
 }
 

@@ -3,9 +3,10 @@
 use image::ExtendedColorType;
 use image::codecs::webp::WebPEncoder;
 
-use super::canvas::Canvas;
+use super::Picture;
 use super::paint::Paint;
 use crate::color::Color;
+use crate::logo::Planned;
 use crate::matrix::Matrix;
 use crate::render::options::{RenderError, RenderOptions};
 
@@ -14,7 +15,7 @@ const FORMAT: &str = "webp";
 /// Renders `matrix` as a lossless WebP image.
 ///
 /// The pixel layout is the narrowest that holds the colours: grey, grey
-/// with alpha, RGB or RGBA. The encoder needs the whole image in memory,
+/// with alpha, RGB or RGBA (with a logo, RGB or RGBA). The encoder needs the whole image in memory,
 /// so the buffer is reserved fallibly and an allocation failure is an
 /// error rather than an abort. WebP has no density field, so `dpi` is not
 /// recorded.
@@ -33,10 +34,22 @@ const FORMAT: &str = "webp";
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn render_webp(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, RenderError> {
-    let canvas = Canvas::new(matrix, options, FORMAT, 1)?;
     let paint = Paint::new(options);
+    let plan = Planned::new(matrix, options)?;
+    let picture = Picture::new(matrix, plan.as_ref(), options, paint.light, FORMAT, 1)?;
+    let canvas = &picture.canvas;
     let side = canvas.side();
-    let (layout, light, dark) = pixel_layout(paint);
+    let (layout, light, dark) = match &picture.layer {
+        None => pixel_layout(paint),
+        Some(layer) if paint.is_opaque() && layer.is_opaque() => {
+            (ExtendedColorType::Rgb8, rgb(paint.light), rgb(paint.dark))
+        }
+        Some(_) => (
+            ExtendedColorType::Rgba8,
+            rgba(paint.light),
+            rgba(paint.dark),
+        ),
+    };
 
     let len = u64::from(side) * u64::from(side) * light.len() as u64;
     let mut pixels = Vec::new();
@@ -44,15 +57,28 @@ pub fn render_webp(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, 
         .ok()
         .and_then(|len| pixels.try_reserve_exact(len).ok())
         .ok_or_else(|| error(format!("cannot allocate {len} bytes for the image")))?;
-    canvas.for_each_row(
-        |y, row: &mut Vec<&[u8]>| canvas.fill_row(y, light.as_slice(), dark.as_slice(), row),
-        |row| {
-            for px in row {
-                pixels.extend_from_slice(px);
-            }
-            Ok::<(), RenderError>(())
-        },
-    )?;
+    if picture.layer.is_some() {
+        let channels = light.len();
+        canvas.for_each_row(
+            |y, row: &mut Vec<Color>| picture.fill_colors(y, paint.light, paint.dark, row),
+            |row| {
+                for c in row {
+                    pixels.extend_from_slice(&[c.r, c.g, c.b, c.a][..channels]);
+                }
+                Ok::<(), RenderError>(())
+            },
+        )?;
+    } else {
+        canvas.for_each_row(
+            |y, row: &mut Vec<&[u8]>| canvas.fill_row(y, light.as_slice(), dark.as_slice(), row),
+            |row| {
+                for px in row {
+                    pixels.extend_from_slice(px);
+                }
+                Ok::<(), RenderError>(())
+            },
+        )?;
+    }
 
     let mut out = Vec::new();
     WebPEncoder::new_lossless(&mut out)

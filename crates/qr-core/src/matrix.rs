@@ -115,6 +115,21 @@ impl Matrix {
     pub fn dark_count(&self) -> usize {
         self.modules.iter().filter(|m| **m).count()
     }
+
+    /// A copy with every module in columns `xs` and rows `ys` (each
+    /// `[start, end)`) set to light. Ranges beyond the grid are ignored.
+    pub(crate) fn with_light_rect(&self, xs: (usize, usize), ys: (usize, usize)) -> Self {
+        let mut copy = self.clone();
+        for y in ys.0..ys.1.min(self.width) {
+            let row = y * self.width;
+            for x in xs.0..xs.1.min(self.width) {
+                if let Some(module) = copy.modules.get_mut(row + x) {
+                    *module = false;
+                }
+            }
+        }
+        copy
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +143,17 @@ mod tests {
             vec![true, false, false, false, true, false, true, true, true],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn light_rect_clears_only_inside_the_grid() {
+        let m = sample();
+        let cleared = m.with_light_rect((1, 9), (2, 9));
+        assert_eq!(
+            cleared.modules(),
+            [true, false, false, false, true, false, true, false, false]
+        );
+        assert_eq!(m.with_light_rect((2, 1), (0, 3)), m, "empty range");
     }
 
     #[test]

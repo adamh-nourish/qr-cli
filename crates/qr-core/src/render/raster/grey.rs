@@ -2,9 +2,10 @@
 //! code back with a decoder (see [`crate::verify`]) without encoding and
 //! decoding a file.
 
-use super::canvas::Canvas;
+use super::Picture;
 use super::paint::Paint;
 use crate::color::Color;
+use crate::logo::Planned;
 use crate::matrix::Matrix;
 use crate::render::options::{RenderError, RenderOptions};
 
@@ -17,30 +18,32 @@ pub(crate) struct GreyImage {
     pub(crate) pixels: Vec<u8>,
 }
 
-/// `matrix` drawn with `options` (shapes and colours included) flattened
-/// onto an opaque backdrop, as a scanner would see it printed, produced a
-/// row at a time so that no full-size bitmap is held.
+/// `matrix` drawn with `options` (shapes, colours and logo included)
+/// flattened onto an opaque backdrop, as a scanner would see it printed,
+/// produced a row at a time so that no full-size bitmap is held.
 pub(crate) struct GreyRows<'m> {
-    canvas: Canvas<'m>,
+    picture: Picture<'m>,
     light: u8,
     dark: u8,
 }
 
 impl<'m> GreyRows<'m> {
-    /// The drawing of `matrix` with `options` on `backdrop`.
+    /// The drawing of `matrix` with `options` on `backdrop`; with a logo,
+    /// `plan` is its plan for `options` (see [`Planned::new`]).
     ///
     /// # Errors
     ///
     /// Returns [`RenderError`] if the options break a size limit.
     pub(crate) fn new(
         matrix: &'m Matrix,
+        plan: Option<&'m Planned<'_>>,
         options: &RenderOptions,
         backdrop: Color,
     ) -> Result<Self, RenderError> {
-        let canvas = Canvas::new(matrix, options, "verify", 1)?;
         let paint = Paint::new(options).flattened(backdrop);
+        let picture = Picture::new(matrix, plan, options, paint.light, "verify", 1)?;
         Ok(Self {
-            canvas,
+            picture,
             light: luma(paint.light),
             dark: luma(paint.dark),
         })
@@ -48,12 +51,16 @@ impl<'m> GreyRows<'m> {
 
     /// Width and height in pixels.
     pub(crate) fn side(&self) -> u32 {
-        self.canvas.side()
+        self.picture.canvas.side()
     }
 
     /// Replaces `out` with the luma values of row `y`.
     pub(crate) fn fill_row(&self, y: u32, out: &mut Vec<u8>) {
-        self.canvas.fill_row(y, self.light, self.dark, out);
+        self.picture.canvas.fill_row(y, self.light, self.dark, out);
+        if let Some(layer) = &self.picture.layer {
+            // Painted over the opaque light colour, so already opaque.
+            layer.paint(y, out, luma);
+        }
     }
 }
 
@@ -75,7 +82,7 @@ mod tests {
         options: &RenderOptions,
         backdrop: Color,
     ) -> Result<GreyImage, RenderError> {
-        let rows = GreyRows::new(matrix, options, backdrop)?;
+        let rows = GreyRows::new(matrix, None, options, backdrop)?;
         let side = rows.side();
         let mut pixels = Vec::new();
         let mut row = Vec::new();

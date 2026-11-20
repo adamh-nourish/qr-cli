@@ -3,6 +3,10 @@
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Encodes `bytes` as padded standard base64.
+///
+/// ```
+/// assert_eq!(qr_core::render::base64(b"foobar"), "Zm9vYmFy");
+/// ```
 pub fn base64(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -25,6 +29,10 @@ pub fn base64(bytes: &[u8]) -> String {
 /// A `data:` URI holding `bytes` of type `media_type`, base64 encoded.
 ///
 /// `media_type` comes from a fixed table, never from user input.
+///
+/// ```
+/// assert_eq!(qr_core::render::data_uri("text/plain", b"hi"), "data:text/plain;base64,aGk=");
+/// ```
 pub fn data_uri(media_type: &str, bytes: &[u8]) -> String {
     format!("data:{media_type};base64,{}", base64(bytes))
 }

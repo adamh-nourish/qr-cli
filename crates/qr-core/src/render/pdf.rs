@@ -24,7 +24,8 @@ pub const PDF_MAX_PAGE_SIDE: u32 = 14_400;
 /// # Errors
 ///
 /// Returns [`RenderError`] if the scale is zero, the page would exceed
-/// [`PDF_MAX_PAGE_SIDE`] points, or the title is too long.
+/// [`PDF_MAX_PAGE_SIDE`] points, or the title is too long, and
+/// [`RenderError::LogoUnsupported`] if the options carry a logo.
 ///
 /// ```
 /// use qr_core::{EncodeOptions, RenderOptions, encode, render_pdf};
@@ -35,6 +36,9 @@ pub const PDF_MAX_PAGE_SIDE: u32 = 14_400;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn render_pdf(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, RenderError> {
+    if options.logo.is_some() {
+        return Err(RenderError::LogoUnsupported { format: "pdf" });
+    }
     let layout = options.layout(matrix, "pdf", PDF_MAX_PAGE_SIDE.min(MAX_CANVAS_SIDE))?;
     let side = layout.side;
     let background = options.background();

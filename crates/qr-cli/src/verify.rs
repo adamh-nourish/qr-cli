@@ -27,7 +27,8 @@ pub(crate) enum OnAutoFailure {
 }
 
 /// The policy for automatic checks. `rqrr` misread none of the 200 styled
-/// codes in `qr-core/tests/verify_corpus.rs` (0.0%, under the 2% limit),
+/// codes in `qr-core/tests/verify_corpus.rs` (0.0%, under the 2% limit)
+/// and 1 of the 200 logo codes in `qr-core/tests/logo_corpus.rs` (0.5%),
 /// so an automatic check fails like an explicit one.
 pub(crate) const AUTO_VERIFY: OnAutoFailure = OnAutoFailure::Fail;
 
@@ -38,6 +39,8 @@ pub enum Remedy {
     /// The colours, as drawn, are below [`qr_core::MIN_CONTRAST`]: neither
     /// error correction nor size helps.
     Contrast,
+    /// A logo covers part of the symbol: a smaller one helps most.
+    Logo,
     /// A raster image, which is read at its own size: bigger modules help.
     Raster {
         /// Whether `--size` set the size (so `--scale` would be ignored).
@@ -62,6 +65,7 @@ impl Remedy {
             // Text is checked as plain black on white.
             Renderer::Text => Self::Other { square: true },
             renderer if as_drawn(options, renderer).contrast().is_low() => Self::Contrast,
+            _ if options.logo.is_some() => Self::Logo,
             Renderer::Raster(_) => Self::Raster {
                 sized: options.size.is_some(),
                 square,
@@ -74,6 +78,7 @@ impl Remedy {
     pub const fn hint(self) -> &'static str {
         match self {
             Self::Contrast => "use a darker --fg or a lighter --bg",
+            Self::Logo => "try a smaller --logo-scale",
             Self::Raster {
                 sized: false,
                 square: false,
@@ -382,6 +387,9 @@ mod tests {
             .with_fg(Color::WHITE)
             .with_bg(Color::BLACK)
             .with_transparent(true);
+        let image = qr_core::loader::Bitmap::from_rgba(1, 1, vec![0, 0, 0, 255]).unwrap();
+        let logo = RenderOptions::default().with_logo(Some(qr_core::logo::Logo::new(image)));
+        let pale_logo = logo.clone().with_fg(Color::rgb(0xdd, 0xdd, 0xdd));
         let table = [
             (SVG, &pale, "use a darker --fg or a lighter --bg"),
             (PNG, &pale, "use a darker --fg or a lighter --bg"),
@@ -402,6 +410,9 @@ mod tests {
             ),
             // Text is checked as plain black on white, whatever the colours.
             (Renderer::Text, &pale, "try --ec H"),
+            (PNG, &logo, "try a smaller --logo-scale"),
+            (SVG, &logo, "try a smaller --logo-scale"),
+            (PNG, &pale_logo, "use a darker --fg or a lighter --bg"),
         ];
         for (renderer, options, hint) in table {
             assert_eq!(

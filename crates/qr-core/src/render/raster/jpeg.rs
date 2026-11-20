@@ -3,10 +3,10 @@
 
 use jpeg_encoder::{Density, Encoder, ImageBuffer, JpegColorType, SamplingFactor};
 
-use super::canvas::Canvas;
 use super::paint::Paint;
-use super::{JPEG_MIN_SCALE, JPEG_QUALITY};
+use super::{JPEG_MIN_SCALE, JPEG_QUALITY, Picture};
 use crate::color::Color;
+use crate::logo::Planned;
 use crate::matrix::Matrix;
 use crate::render::options::{RenderError, RenderOptions};
 
@@ -34,8 +34,17 @@ const FORMAT: &str = "jpeg";
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn render_jpeg(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, RenderError> {
-    let canvas = Canvas::new(matrix, options, FORMAT, JPEG_MIN_SCALE)?;
     let paint = Paint::new(options).flattened(Color::WHITE);
+    let plan = Planned::new(matrix, options)?;
+    let picture = Picture::new(
+        matrix,
+        plan.as_ref(),
+        options,
+        paint.light,
+        FORMAT,
+        JPEG_MIN_SCALE,
+    )?;
+    let canvas = &picture.canvas;
     // The canvas is at most MAX_CANVAS_SIDE (16,384) pixels across.
     let side = u16::try_from(canvas.side()).map_err(|_| RenderError::TooLarge {
         format: FORMAT,
@@ -52,9 +61,11 @@ pub fn render_jpeg(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, 
         encoder.set_density(Density::Inch { x: dpi, y: dpi });
     }
     let image = Rows {
-        canvas,
+        picture: &picture,
         side,
-        luma: paint.is_grey(),
+        // A logo is drawn in colour, whatever the modules' colours.
+        luma: paint.is_grey() && picture.layer.is_none(),
+        paint,
         light: ycbcr(paint.light),
         dark: ycbcr(paint.dark),
     };
@@ -70,15 +81,16 @@ pub fn render_jpeg(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, 
 /// The canvas as a `jpeg-encoder` image source. The encoder asks for rows
 /// as it compresses each band of blocks, so the full image is never held
 /// in memory.
-struct Rows<'m> {
-    canvas: Canvas<'m>,
+struct Rows<'p, 'm> {
+    picture: &'p Picture<'m>,
     side: u16,
     luma: bool,
+    paint: Paint,
     light: [u8; 3],
     dark: [u8; 3],
 }
 
-impl ImageBuffer for Rows<'_> {
+impl ImageBuffer for Rows<'_, '_> {
     fn get_jpeg_color_type(&self) -> JpegColorType {
         if self.luma {
             JpegColorType::Luma
@@ -97,7 +109,27 @@ impl ImageBuffer for Rows<'_> {
 
     fn fill_buffers(&self, y: u16, buffers: &mut [Vec<u8>; 4]) {
         let channels = if self.luma { 1 } else { 3 };
-        self.canvas.row_runs(u32::from(y), |dark, len| {
+        let y = u32::from(y);
+        let in_logo = self.picture.layer.as_ref().is_some_and(|layer| {
+            let (start, end) = layer.rows();
+            (start..end).contains(&y)
+        });
+        if in_logo {
+            let mut colors = Vec::new();
+            self.picture
+                .fill_colors(y, self.paint.light, self.paint.dark, &mut colors);
+            // The light colour is already flattened onto white and the logo
+            // painted over it, so the colours are opaque; `over` is a no-op
+            // kept for safety.
+            for color in colors {
+                let value = ycbcr(color.over(Color::WHITE));
+                for (buffer, v) in buffers.iter_mut().zip(value).take(channels) {
+                    buffer.push(v);
+                }
+            }
+            return;
+        }
+        self.picture.canvas.row_runs(y, |dark, len| {
             let color = if dark { self.dark } else { self.light };
             for (buffer, value) in buffers.iter_mut().zip(color).take(channels) {
                 buffer.extend(std::iter::repeat_n(value, len as usize));

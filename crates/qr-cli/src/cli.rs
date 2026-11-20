@@ -10,6 +10,7 @@ use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+use qr_core::logo::LogoScale;
 use qr_core::render::{MAX_CANVAS_SIDE, MAX_DPI};
 use qr_core::{Color, EcLevel, Mask, ModeChoice, ModuleShape, Version};
 
@@ -34,6 +35,8 @@ Examples:
   qr 'hi' -f pdf -o - > c.pdf  Write a PDF to stdout
   qr 'hi' --shape dots --fg navy -o c.png
                                Write a styled PNG (checked automatically)
+  qr 'https://example.com' --logo logo.png -o c.png
+                               Put a logo in the middle (EC H, checked)
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr wifi --ssid Home --password-stdin < pw.txt
                                Share a WiFi network (see 'qr wifi --help')
@@ -143,9 +146,9 @@ pub struct RenderArgs {
     #[arg(short = 'f', long = "format", value_enum, value_name = "FORMAT")]
     pub format: Option<OutputFormat>,
 
-    /// Error correction level: L, M, Q or H.
-    #[arg(long = "ec", value_name = "LEVEL", default_value = "M", value_parser = EcLevel::from_str)]
-    pub ec_level: EcLevel,
+    /// Error correction level: L, M, Q or H [default: M; H with --logo].
+    #[arg(long = "ec", value_name = "LEVEL", value_parser = EcLevel::from_str)]
+    pub ec_level: Option<EcLevel>,
 
     /// Smallest symbol version to use, 1 to 40 (larger data still grows it).
     #[arg(long = "qr-version", value_name = "N", value_parser = Version::from_str)]
@@ -218,8 +221,19 @@ pub struct RenderArgs {
     #[arg(long, value_enum, value_name = "SHAPE", default_value_t = Shape::Square)]
     pub shape: Shape,
 
+    /// Draw a PNG, JPEG or WebP image (at most 10 MiB and 8192x8192) over
+    /// the centre of a png, jpeg, webp or svg code. Sets --ec H (a lower
+    /// --ec is overridden with a warning) and checks the code reads back.
+    #[arg(long, value_name = "FILE")]
+    pub logo: Option<PathBuf>,
+
+    /// Width of the --logo as a fraction of the code's width, 0.05 to 0.3
+    /// [default: 0.2].
+    #[arg(long, value_name = "FRACTION", requires = "logo", value_parser = LogoScale::from_str)]
+    pub logo_scale: Option<LogoScale>,
+
     /// Read the rendered code back with a decoder and fail (exit 6) unless it
-    /// holds the input. Automatic for images with a non-default
+    /// holds the input. Automatic for images with a --logo or a non-default
     /// --shape/--fg/--bg, --transparent or --invert. Text output is checked
     /// as a plain module grid (the symbol, not the characters).
     #[arg(long, overrides_with = "no_verify")]
@@ -338,7 +352,8 @@ mod tests {
         assert!(!cli.generate.keep_newline);
         assert_eq!(cli.generate.input, None);
         let g = cli.render_args().clone();
-        assert_eq!(g.ec_level, EcLevel::M);
+        assert_eq!(g.ec_level, None);
+        assert_eq!((g.logo, g.logo_scale), (None, None));
         assert_eq!(g.mode, ModeChoice::Auto);
         assert_eq!(g.margin, 4);
         assert_eq!((g.qr_version, g.mask, g.format), (None, None, None));
@@ -378,7 +393,10 @@ mod tests {
             render.output.as_deref(),
             Some(std::path::Path::new("w.png"))
         );
-        assert_eq!((render.shape, render.ec_level), (Shape::Dots, EcLevel::H));
+        assert_eq!(
+            (render.shape, render.ec_level),
+            (Shape::Dots, Some(EcLevel::H))
+        );
         assert!(!wifi.output.print_payload);
     }
 
@@ -492,6 +510,23 @@ mod tests {
         assert!(g.verify && !g.no_verify);
         let err = Cli::try_parse_from(["qr", "--shape", "star", "x"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn logo_flags_parse() {
+        let cli =
+            Cli::try_parse_from(["qr", "--logo", "l.png", "--logo-scale", "0.3", "x"]).unwrap();
+        let g = cli.generate.render;
+        assert_eq!(g.logo.as_deref(), Some(std::path::Path::new("l.png")));
+        assert_eq!(g.logo_scale, Some(LogoScale::MAX));
+        // The scale needs a logo and a value in range.
+        let err = Cli::try_parse_from(["qr", "--logo-scale", "0.2", "x"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        for bad in ["0.31", "0.04", "big"] {
+            let err = Cli::try_parse_from(["qr", "--logo", "l.png", "--logo-scale", bad, "x"])
+                .unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{bad}");
+        }
     }
 
     #[test]

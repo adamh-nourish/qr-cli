@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 use crate::color::Color;
+use crate::logo::Logo;
 use crate::matrix::Matrix;
 use crate::render::shape::ModuleShape;
 use crate::render::text::{DEFAULT_MARGIN, MAX_MARGIN};
@@ -89,6 +90,21 @@ pub enum RenderError {
         /// The encoder's own description of the failure.
         message: String,
     },
+    /// A logo was asked for in a format that cannot carry one (PDF and
+    /// EPS in v1).
+    #[error("{format} output cannot carry a logo (use png, jpeg, webp or svg)")]
+    LogoUnsupported {
+        /// The format being rendered.
+        format: &'static str,
+    },
+    /// The symbol is too small to clear any modules for a logo outside
+    /// the finder patterns. Real symbols (21 modules and up) always have
+    /// room.
+    #[error("a {modules}-module symbol has no room for a logo")]
+    LogoNoRoom {
+        /// The symbol's width in modules.
+        modules: usize,
+    },
     /// The document title is longer than [`MAX_TITLE_CHARS`].
     #[error("title is {chars} characters long (the limit is {max})")]
     TitleTooLong {
@@ -138,6 +154,9 @@ pub struct RenderOptions {
     /// Optional document title, written as escaped metadata (SVG `<title>`,
     /// the PDF `/Title` entry and the EPS `%%Title` comment).
     pub title: Option<String>,
+    /// Optional logo over the centre of the symbol (raster and SVG output;
+    /// PDF and EPS refuse it). See [`crate::logo`].
+    pub logo: Option<Logo>,
 }
 
 impl Default for RenderOptions {
@@ -152,6 +171,7 @@ impl Default for RenderOptions {
             transparent: false,
             shape: ModuleShape::Square,
             title: None,
+            logo: None,
         }
     }
 }
@@ -219,6 +239,13 @@ impl RenderOptions {
     #[must_use]
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// Returns these options with the given logo, or none.
+    #[must_use]
+    pub fn with_logo(mut self, logo: Option<Logo>) -> Self {
+        self.logo = logo;
         self
     }
 

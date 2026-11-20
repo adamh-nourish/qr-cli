@@ -12,7 +12,6 @@
 //! the `svg` default, and an image extension, which would leave a file that
 //! is not that image, is used with a warning.
 
-mod data_uri;
 mod format;
 pub mod json;
 mod write;
@@ -20,12 +19,12 @@ mod write;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub use self::data_uri::{base64, data_uri};
 pub use self::format::{Renderer, known_extensions};
 pub use self::write::{WriteError, precheck, write_atomic};
 use crate::cli::{OutputFormat, RenderArgs};
 use crate::diag::Reporter;
 use crate::error::CliError;
+pub use qr_core::render::{base64, data_uri};
 
 /// The format `--data-uri` uses when neither `-f` nor `-o` names one.
 pub const DATA_URI_DEFAULT_FORMAT: OutputFormat = OutputFormat::Svg;

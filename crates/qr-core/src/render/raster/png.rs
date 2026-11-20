@@ -5,9 +5,11 @@ use std::io::Write as _;
 
 use png::{BitDepth, ColorType, Compression, Encoder, Filter, PixelDimensions, Unit};
 
-use super::canvas::Canvas;
+use super::Picture;
+use super::logo::LogoLayer;
 use super::paint::Paint;
 use crate::color::Color;
+use crate::logo::Planned;
 use crate::matrix::Matrix;
 use crate::render::options::{RenderError, RenderOptions};
 
@@ -17,8 +19,9 @@ const FORMAT: &str = "png";
 ///
 /// Two opaque colours give a 1-bit image with a two-entry palette (light is
 /// index 0, dark index 1), the smallest file and the least encoding work. A
-/// transparent or translucent colour gives 8-bit RGBA. `dpi`, when set, is
-/// written as a `pHYs` chunk in pixels per metre.
+/// transparent or translucent colour gives 8-bit RGBA. A logo gives 8-bit
+/// RGB, or RGBA when anything is translucent. `dpi`, when set, is written
+/// as a `pHYs` chunk in pixels per metre.
 ///
 /// # Errors
 ///
@@ -33,9 +36,12 @@ const FORMAT: &str = "png";
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn render_png(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, RenderError> {
-    let canvas = Canvas::new(matrix, options, FORMAT, 1)?;
     let paint = Paint::new(options);
+    let plan = Planned::new(matrix, options)?;
+    let picture = Picture::new(matrix, plan.as_ref(), options, paint.light, FORMAT, 1)?;
+    let canvas = &picture.canvas;
     let side = canvas.side();
+    let layer = picture.layer.as_ref();
 
     let mut out = Vec::new();
     {
@@ -51,7 +57,8 @@ pub fn render_png(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, R
                 unit: Unit::Meter,
             }));
         }
-        let indexed = paint.is_opaque();
+        let opaque = paint.is_opaque() && layer.is_none_or(LogoLayer::is_opaque);
+        let indexed = paint.is_opaque() && layer.is_none();
         if indexed {
             encoder.set_color(ColorType::Indexed);
             encoder.set_depth(BitDepth::One);
@@ -60,6 +67,9 @@ pub fn render_png(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, R
             // (424 vs 635 bytes with adaptive filtering on the same code).
             encoder.set_filter(Filter::NoFilter);
             encoder.set_palette(palette(paint).to_vec());
+        } else if opaque {
+            encoder.set_color(ColorType::Rgb);
+            encoder.set_depth(BitDepth::Eight);
         } else {
             encoder.set_color(ColorType::Rgba);
             encoder.set_depth(BitDepth::Eight);
@@ -68,10 +78,17 @@ pub fn render_png(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, R
         let mut writer = encoder.write_header().map_err(|e| encode_error(&e))?;
         let mut stream = writer.stream_writer().map_err(|e| encode_error(&e))?;
         let (light, dark) = (rgba(paint.light), rgba(paint.dark));
+        let mut colors = Vec::new();
         canvas.for_each_row(
             |y, row: &mut Vec<u8>| {
                 if indexed {
                     canvas.fill_bits(y, row);
+                } else if layer.is_some() {
+                    picture.fill_colors(y, paint.light, paint.dark, &mut colors);
+                    row.clear();
+                    for c in &colors {
+                        row.extend_from_slice(&rgba(*c)[..if opaque { 3 } else { 4 }]);
+                    }
                 } else {
                     let mut pixels = Vec::new();
                     canvas.fill_row(y, light, dark, &mut pixels);

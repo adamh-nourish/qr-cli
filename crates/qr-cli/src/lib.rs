@@ -13,6 +13,7 @@
 //!   URIs and the `--json` objects;
 //! - `style` and `verify`: colour and shape options, contrast warnings and
 //!   the `--verify` read-back check;
+//! - `logo`: `--logo`, read through `qr_core`'s bounded image loader;
 //! - [`diag`]: errors, warnings and notes on stderr;
 //! - [`env`](mod@env): terminal and environment detection;
 //! - [`error`] and [`exit`]: typed errors and the exit status contract.
@@ -26,6 +27,7 @@ pub mod error;
 pub mod exit;
 mod generate;
 pub mod input;
+mod logo;
 pub mod output;
 mod payload;
 mod style;

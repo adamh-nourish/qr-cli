@@ -3,6 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use qr_core::loader::LoadError;
 use qr_core::payload::PayloadError;
 use qr_core::verify::VerifyError;
 use qr_core::{EcLevel, EncodeError, RenderError};
@@ -84,6 +85,30 @@ pub enum CliError {
     #[error("--json cannot share stdout with the {} output", .0.name())]
     JsonNeedsOutput(OutputFormat),
 
+    /// `--logo` with a format that cannot carry one.
+    #[error("--logo needs png, jpeg, webp or svg output, not {}", .0.name())]
+    LogoNeedsImage(OutputFormat),
+
+    /// The `--logo` file could not be opened or read.
+    #[error("cannot read logo '{}': {}", .path.display(), io_reason(.error))]
+    ReadLogo {
+        /// The logo path.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        error: io::Error,
+    },
+
+    /// The `--logo` file is not an acceptable image.
+    #[error("cannot use logo '{}': {error}", .path.display())]
+    Logo {
+        /// The logo path.
+        path: PathBuf,
+        /// What is wrong with it.
+        #[source]
+        error: LoadError,
+    },
+
     /// The renderer rejected the options (for example, too large).
     #[error(transparent)]
     Render(#[from] RenderError),
@@ -137,7 +162,9 @@ impl CliError {
             | Self::UnknownExtension(_)
             | Self::BinaryToTerminal(_)
             | Self::DataUriNeedsImage(_)
-            | Self::JsonNeedsOutput(_) => ExitStatus::Usage,
+            | Self::JsonNeedsOutput(_)
+            | Self::LogoNeedsImage(_) => ExitStatus::Usage,
+            Self::Logo { error, .. } if error.is_invalid_image() => ExitStatus::Usage,
             Self::Verify { error, .. } if error.is_failure() => ExitStatus::VerificationFailed,
             // An encoder failing on valid options is not the user's fault.
             Self::Render(RenderError::Encoder { .. })
@@ -156,6 +183,8 @@ impl CliError {
                 ExitStatus::DataTooLong
             }
             Self::ReadInput { .. }
+            | Self::ReadLogo { .. }
+            | Self::Logo { .. }
             | Self::Output(_)
             | Self::OutputExists(_)
             | Self::OutputNotAFile(_)
@@ -175,12 +204,17 @@ impl CliError {
                 "data_too_long"
             }
             Self::Encode(EncodeError::InvalidCharacter { .. }) => "invalid_character",
-            Self::ReadInput { .. } => "read_failed",
+            Self::ReadInput { .. } | Self::ReadLogo { .. } => "read_failed",
             Self::Output(_) | Self::WriteFile { .. } => "write_failed",
             Self::UnknownExtension(_) => "unknown_extension",
             Self::BinaryToTerminal(_) => "binary_to_terminal",
             Self::DataUriNeedsImage(_) => "data_uri_needs_image",
             Self::JsonNeedsOutput(_) => "json_needs_output",
+            Self::LogoNeedsImage(_) => "logo_needs_image",
+            Self::Logo { error, .. } if error.is_invalid_image() => "invalid_logo",
+            // A logo that could not be read, like any other read.
+            #[allow(clippy::match_same_arms)]
+            Self::Logo { .. } => "read_failed",
             Self::Verify { error, .. } if error.is_failure() => "verification_failed",
             Self::Render(_)
             | Self::Verify {
@@ -232,6 +266,27 @@ impl CliError {
                 f.name()
             )),
             Self::DataUriNeedsImage(_) => Some("use -f svg, -f pdf or -f eps".to_owned()),
+            Self::LogoNeedsImage(_) => {
+                Some("use -f png, -f svg or an -o name ending in .png or .svg".to_owned())
+            }
+            Self::ReadLogo { .. } => Some("check the path passed to --logo".to_owned()),
+            Self::Logo {
+                error:
+                    LoadError::UnsupportedFormat
+                    | LoadError::Empty
+                    | LoadError::Truncated { .. }
+                    | LoadError::Decode { .. },
+                ..
+            } => Some("convert it to png, jpeg or webp (svg logos are not supported)".to_owned()),
+            Self::Logo {
+                error:
+                    LoadError::FileTooLarge { .. }
+                    | LoadError::DimensionsTooLarge { .. }
+                    | LoadError::TooMuchMemory { .. },
+                ..
+            } => {
+                Some("use a smaller logo image (a few hundred pixels across is plenty)".to_owned())
+            }
             Self::JsonNeedsOutput(_) => Some(
                 "write the code to a file with -o PATH, or add --data-uri to put it in the JSON"
                     .to_owned(),
@@ -265,6 +320,7 @@ impl CliError {
             | Self::ReadInput { .. }
             | Self::Output(_)
             | Self::WriteFile { .. }
+            | Self::Logo { .. }
             | Self::Render(_) => None,
         }
     }
@@ -380,6 +436,103 @@ mod tests {
                 assert!(err.hint().is_some(), "{err}");
             }
         }
+    }
+
+    #[test]
+    fn logo_errors_have_statuses_codes_and_hints() {
+        use qr_core::loader::{ImageKind, MAX_IMAGE_ALLOC, MAX_IMAGE_FILE_BYTES, MAX_IMAGE_SIDE};
+        let logo = |error| CliError::Logo {
+            path: PathBuf::from("l.png"),
+            error,
+        };
+        let convert = "convert it to png, jpeg or webp (svg logos are not supported)";
+        let smaller = "use a smaller logo image (a few hundred pixels across is plenty)";
+        let table = [
+            (
+                logo(LoadError::UnsupportedFormat),
+                "invalid_logo",
+                Some(convert),
+            ),
+            (logo(LoadError::Empty), "invalid_logo", Some(convert)),
+            (
+                logo(LoadError::Truncated {
+                    kind: ImageKind::Png,
+                    bytes: 3,
+                }),
+                "invalid_logo",
+                Some(convert),
+            ),
+            (
+                logo(LoadError::Decode {
+                    kind: ImageKind::Webp,
+                    message: "bad".into(),
+                }),
+                "invalid_logo",
+                Some(convert),
+            ),
+            (
+                logo(LoadError::FileTooLarge {
+                    bytes: None,
+                    max: MAX_IMAGE_FILE_BYTES,
+                }),
+                "invalid_logo",
+                Some(smaller),
+            ),
+            (
+                logo(LoadError::DimensionsTooLarge {
+                    dimensions: None,
+                    max: MAX_IMAGE_SIDE,
+                }),
+                "invalid_logo",
+                Some(smaller),
+            ),
+            (
+                logo(LoadError::TooMuchMemory {
+                    bytes: None,
+                    max: MAX_IMAGE_ALLOC,
+                }),
+                "invalid_logo",
+                Some(smaller),
+            ),
+            (
+                CliError::LogoNeedsImage(OutputFormat::Pdf),
+                "logo_needs_image",
+                Some("use -f png, -f svg or an -o name ending in .png or .svg"),
+            ),
+        ];
+        for (err, code, hint) in table {
+            assert_eq!(err.exit_status(), ExitStatus::Usage, "{err}");
+            assert_eq!(err.code(), code, "{err}");
+            assert_eq!(err.hint().as_deref(), hint, "{err}");
+        }
+        let read = logo(LoadError::Read(io::Error::other("gone")));
+        assert_eq!(read.exit_status(), ExitStatus::Io);
+        assert_eq!(read.code(), "read_failed");
+        assert_eq!(read.hint(), None);
+        assert_eq!(
+            read.to_string(),
+            "cannot use logo 'l.png': cannot read the image: gone"
+        );
+        let open = CliError::ReadLogo {
+            path: PathBuf::from("l.png"),
+            error: io::Error::from(io::ErrorKind::NotFound),
+        };
+        assert_eq!(
+            (open.exit_status(), open.code()),
+            (ExitStatus::Io, "read_failed")
+        );
+        assert_eq!(
+            open.to_string(),
+            "cannot read logo 'l.png': no such file or directory"
+        );
+        assert!(open.source().is_some());
+        assert_eq!(
+            CliError::LogoNeedsImage(OutputFormat::Eps).to_string(),
+            "--logo needs png, jpeg, webp or svg output, not eps"
+        );
+        // A logo the renderer refuses is a usage error like any render limit.
+        let render = CliError::Render(RenderError::LogoUnsupported { format: "pdf" });
+        assert_eq!(render.exit_status(), ExitStatus::Usage);
     }
 
     #[test]

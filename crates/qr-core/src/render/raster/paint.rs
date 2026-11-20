@@ -49,7 +49,7 @@ impl Paint {
 
 /// `top` painted over `bottom` (Porter-Duff source-over) with straight,
 /// 8-bit alpha. Unlike [`Color::over`], the backdrop may be translucent.
-fn composite(top: Color, bottom: Color) -> Color {
+pub(crate) fn composite(top: Color, bottom: Color) -> Color {
     if top.is_opaque() || bottom.is_invisible() {
         return top;
     }
