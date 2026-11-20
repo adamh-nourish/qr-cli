@@ -45,6 +45,77 @@ pub struct Generated {
     pub verified: Option<bool>,
 }
 
+/// The result of `qr decode --json`: every image in command-line order,
+/// then the totals.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DecodeReport {
+    /// One entry per `IMAGE` argument.
+    pub images: Vec<DecodedImage>,
+    /// Totals over all images.
+    pub summary: DecodeSummary,
+}
+
+/// What one image held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecodedImage {
+    /// The path as given, or `-` for stdin.
+    pub path: String,
+    /// The codes read, top to bottom, then left to right. Empty when the
+    /// image could not be read or held no readable code.
+    pub payloads: Vec<DecodedPayload>,
+    /// Why nothing was read, when that is an error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ImageError>,
+}
+
+/// One decoded code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecodedPayload {
+    /// The data as text. Bytes that are not UTF-8 are replaced with
+    /// U+FFFD; `base64` then holds the exact bytes.
+    pub text: String,
+    /// The exact data bytes in standard base64, only when they are not
+    /// valid UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base64: Option<String>,
+    /// The number of data bytes.
+    pub bytes: usize,
+    /// The symbol version, 1 to 40.
+    pub version: u8,
+    /// The error correction level: L, M, Q or H.
+    pub ec: String,
+    /// The mask pattern, 0 to 7.
+    pub mask: u8,
+    /// Whether the code is light on dark.
+    pub inverted: bool,
+    /// The corners in image pixels as `[x, y]`: top-left, top-right,
+    /// bottom-right, bottom-left (as the code is oriented).
+    pub bounds: [[i32; 2]; 4],
+}
+
+/// Why an image yielded nothing: the same code and message as the error
+/// reported on stderr.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImageError {
+    /// A stable identifier, such as `no_code_found` or `invalid_image`.
+    pub code: &'static str,
+    /// The human-readable message.
+    pub message: String,
+}
+
+/// Totals for `qr decode`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DecodeSummary {
+    /// The number of images given.
+    pub images: usize,
+    /// The number of codes decoded, over all images.
+    pub codes: usize,
+    /// Images that could not be read or are not acceptable images.
+    pub unreadable: usize,
+    /// Images that were read but held no readable code.
+    pub no_code: usize,
+}
+
 /// A diagnostic, as a one-line JSON object keyed by its kind:
 /// `{"error":{"code":"...","message":"...","hint":"..."}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

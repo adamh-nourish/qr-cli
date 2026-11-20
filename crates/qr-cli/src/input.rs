@@ -7,8 +7,8 @@
 //! buffered in full.
 
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::error::CliError;
@@ -144,6 +144,30 @@ fn read_bounded<R: Read>(reader: R, source: &InputSource) -> Result<Vec<u8>, Cli
     Ok(data)
 }
 
+/// Opens `path` for reading if it is a regular file, and returns it with
+/// its length.
+///
+/// The type is checked before opening, because opening a FIFO blocks and
+/// a device can be endless: images (`--logo`, `qr decode`) are only read
+/// from regular files, and the length lets the bounded loader refuse an
+/// oversized file before reading it.
+///
+/// # Errors
+///
+/// The metadata or open failure; [`io::ErrorKind::IsADirectory`] for a
+/// directory; an error reading "not a regular file" for anything else that
+/// is not a file.
+pub(crate) fn open_regular_file(path: &Path) -> io::Result<(File, u64)> {
+    let metadata = fs::metadata(path)?;
+    if metadata.is_dir() {
+        return Err(io::Error::from(io::ErrorKind::IsADirectory));
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    Ok((File::open(path)?, metadata.len()))
+}
+
 /// Removes one trailing `\n` or `\r\n`.
 fn strip_trailing_newline(data: &mut Vec<u8>) {
     if data.ends_with(b"\r\n") {
@@ -159,8 +183,8 @@ pub(crate) struct FailingReader;
 
 #[cfg(test)]
 impl Read for FailingReader {
-    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::other("device on fire"))
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::other("device on fire"))
     }
 }
 
@@ -282,7 +306,7 @@ mod tests {
         let input = read_input(&request(None, Some(&path)), FailingReader, true).unwrap();
         assert_eq!(input.data, b"\x00\xffbinary");
         assert_eq!(input.source, InputSource::File(path.clone()));
-        std::fs::remove_file(&path).unwrap();
+        fs::remove_file(&path).unwrap();
 
         let err = read_input(&request(None, Some(&path)), FailingReader, true).unwrap_err();
         assert_eq!(err.exit_status(), ExitStatus::Io);

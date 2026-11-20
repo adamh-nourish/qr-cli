@@ -48,8 +48,9 @@ pub const VERIFY_SCALE: u32 = DEFAULT_SCALE;
 
 /// The smallest module size, in pixels, handed to `rqrr`. Smaller images
 /// are enlarged first: with one pixel per module `rqrr` 0.9 can trip an
-/// internal assertion, which would abort a release build.
-const MIN_READ_SCALE: usize = 3;
+/// internal assertion, which would abort a release build. `qr decode`
+/// ([`crate::decode`]) applies the same guard to images of unknown scale.
+pub(crate) const MIN_READ_SCALE: usize = 3;
 
 /// The most pixels verification decodes: 2,048 x 2,048. A version 40
 /// symbol with the default quiet zone fits at 11 pixels per module.

@@ -1,9 +1,10 @@
 //! Command-line argument definitions.
 //!
 //! Generation is the root command (`qr [OPTIONS] [TEXT]`); subcommands
-//! build structured [`payload`]s (`qr wifi`, `qr vcard`, ...) or are
-//! tooling, and later changes add `decode` and `batch`. Keeping every clap type in this module lets completions and the
-//! man page be generated from a single source of truth.
+//! build structured [`payload`]s (`qr wifi`, `qr vcard`, ...), read codes
+//! back (`qr decode`, [`DecodeArgs`]) or are tooling; a later change adds
+//! `batch`. Keeping every clap type in this module lets completions and
+//! the man page be generated from a single source of truth.
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -40,6 +41,7 @@ Examples:
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr wifi --ssid Home --password-stdin < pw.txt
                                Share a WiFi network (see 'qr wifi --help')
+  qr decode code.png           Print the data held in an image's QR codes
   qr -- wifi                   Encode a word that is also a command name,
                                such as 'wifi', 'url', 'email' or 'help'
 
@@ -82,6 +84,14 @@ impl Cli {
             _ => &self.generate.render,
         }
     }
+
+    /// Whether `--json` was given to the command that runs.
+    pub fn json(&self) -> bool {
+        match &self.command {
+            Some(Command::Decode(decode)) => decode.json,
+            _ => self.render_args().json,
+        }
+    }
 }
 
 /// Subcommands.
@@ -93,6 +103,8 @@ pub enum Command {
     /// `sms`, `tel`, `geo` or `event`.
     #[command(flatten)]
     Payload(PayloadCommand),
+    /// Read the QR codes in PNG, JPEG or WebP images and print their data.
+    Decode(DecodeArgs),
     /// Print a shell completion script to stdout.
     Completions {
         /// The shell to generate completions for.
@@ -256,6 +268,45 @@ pub struct RenderArgs {
     /// Print a JSON result object on stdout and JSON errors on stderr.
     #[arg(long)]
     pub json: bool,
+}
+
+const DECODE_AFTER_HELP: &str = "\
+Each code's data is printed on its own line, with control and bidi
+characters escaped (\\u{1b}) and bytes that are not UTF-8 as \\x{ff}.
+With several images, each line starts with the image's path.
+
+Examples:
+  qr decode code.png           Print the data in code.png
+  qr decode a.png b.jpg --json Print a JSON object for both images
+  qr decode - < code.webp      Read the image from stdin
+  qr decode code.png --raw > data.bin
+                               Write the exact bytes (not to a terminal)
+
+Exit codes:
+  0 every image held a code, 4 an image could not be read,
+  5 an image held no readable code (4 wins if both happen)";
+
+/// Options for `qr decode`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(after_help = DECODE_AFTER_HELP)]
+pub struct DecodeArgs {
+    /// PNG, JPEG or WebP images to read (at most 10 MiB and 8192x8192
+    /// pixels each); '-' reads one from stdin. The format comes from the
+    /// file's contents, not its name.
+    #[arg(value_name = "IMAGE", required = true, num_args = 1..)]
+    pub images: Vec<PathBuf>,
+
+    /// Print one JSON object on stdout with every image's codes (data,
+    /// version, error correction, mask and corners) and JSON errors on
+    /// stderr.
+    #[arg(long, conflicts_with = "raw")]
+    pub json: bool,
+
+    /// Print each code's data exactly, without escaping, followed by a
+    /// newline. Refused when stdout is a terminal, where the data could
+    /// send escape sequences.
+    #[arg(long)]
+    pub raw: bool,
 }
 
 /// Options shared by every command.
@@ -449,6 +500,28 @@ mod tests {
             // Without `--`, the word is the subcommand, which needs arguments.
             assert!(Cli::try_parse_from(["qr", word]).is_err(), "{word}");
         }
+    }
+
+    #[test]
+    fn decode_takes_images_and_flags() {
+        let cli = Cli::try_parse_from(["qr", "decode", "a.png", "-", "--json"]).unwrap();
+        let Some(Command::Decode(decode)) = &cli.command else {
+            panic!("expected decode: {:?}", cli.command);
+        };
+        assert_eq!(decode.images, [PathBuf::from("a.png"), PathBuf::from("-")]);
+        assert!(decode.json && !decode.raw);
+        assert!(cli.json());
+        let cli = Cli::try_parse_from(["qr", "decode", "a.png", "--raw", "-q"]).unwrap();
+        assert!(!cli.json() && cli.global.quiet);
+        // At least one image; --raw and --json do not mix.
+        let err = Cli::try_parse_from(["qr", "decode"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let err = Cli::try_parse_from(["qr", "decode", "a", "--raw", "--json"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        // The word itself can still be encoded.
+        let cli = Cli::try_parse_from(["qr", "--", "decode"]).unwrap();
+        assert_eq!(cli.generate.text.as_deref(), Some("decode"));
+        assert!(!cli.json());
     }
 
     #[test]
