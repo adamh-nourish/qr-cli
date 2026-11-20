@@ -10,6 +10,7 @@
 use std::fmt::Write as _;
 
 use super::PayloadError;
+use crate::sanitize::is_bidi_format;
 
 /// The characters [`backslash`] escapes in WiFi and MeCard values.
 pub(crate) const BACKSLASH_SPECIALS: [char; 5] = ['\\', ';', ',', ':', '"'];
@@ -40,8 +41,11 @@ pub(crate) fn check_controls(
 ) -> Result<(), PayloadError> {
     let allowed =
         |c: char| controls == Controls::AllowLineBreaks && matches!(c, '\t' | '\n' | '\r');
-    match value.chars().find(|&c| c.is_control() && !allowed(c)) {
-        Some(character) => Err(PayloadError::ControlCharacter { field, character }),
+    if let Some(character) = value.chars().find(|&c| c.is_control() && !allowed(c)) {
+        return Err(PayloadError::ControlCharacter { field, character });
+    }
+    match value.chars().find(|&c| is_bidi_format(c)) {
+        Some(character) => Err(PayloadError::BidiCharacter { field, character }),
         None => Ok(()),
     }
 }
@@ -170,6 +174,20 @@ mod tests {
         );
         assert!(check_controls("note", "a\u{0}", Controls::AllowLineBreaks).is_err());
         assert!(check_controls("note", "a\u{85}", Controls::AllowLineBreaks).is_err());
+        for bidi in ['\u{202E}', '\u{2066}', '\u{200F}', '\u{061C}'] {
+            let err = check_controls("name", &format!("a{bidi}b"), Controls::AllowLineBreaks)
+                .unwrap_err();
+            assert_eq!(
+                err,
+                PayloadError::BidiCharacter {
+                    field: "name",
+                    character: bidi
+                }
+            );
+            assert!(err.hint().is_some());
+        }
+        // Right-to-left text itself is fine.
+        assert!(check_controls("name", "שלום مرحبا", Controls::Forbid).is_ok());
         assert!(check_required("note", "", Controls::Forbid).is_err());
     }
 

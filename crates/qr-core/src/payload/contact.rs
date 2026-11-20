@@ -2,8 +2,8 @@
 
 use std::fmt;
 
-use super::PayloadError;
 use super::escape::{self, Controls};
+use super::{PayloadError, Url};
 
 /// The details on a contact card. Only `name` is required.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -38,7 +38,10 @@ impl Contact {
     /// Checks every field: the name must not be blank, phone numbers and
     /// emails must not be blank, an email needs an `@`, and only tab and
     /// line breaks are allowed among control characters.
-    fn validate(&self) -> Result<(), PayloadError> {
+    ///
+    /// The URL is checked and normalised as for `qr url` (`https://` is
+    /// added when it has no scheme), so the validated contact is returned.
+    fn validate(mut self) -> Result<Self, PayloadError> {
         escape::check_required("name", &self.name, Controls::AllowLineBreaks)?;
         for phone in &self.phones {
             escape::check_required("phone number", phone, Controls::Forbid)?;
@@ -54,8 +57,9 @@ impl Contact {
             }
         }
         if let Some(url) = &self.url {
-            // A URI value: it is written unescaped, so it may not break lines.
-            escape::check_required("URL", url, Controls::Forbid)?;
+            // A URI value: it is written unescaped, so it must be a valid
+            // link (which also rules out line breaks).
+            self.url = Some(Url::with_field("URL", url)?.as_str().to_owned());
         }
         for (field, value) in [
             ("organisation", &self.org),
@@ -67,7 +71,7 @@ impl Contact {
                 escape::check_controls(field, value, Controls::AllowLineBreaks)?;
             }
         }
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -100,11 +104,11 @@ impl VCard {
     /// # Errors
     ///
     /// [`PayloadError`] when the name is blank, a phone number or email is
-    /// blank, an email has no `@`, or a field holds a control character
-    /// other than a tab or line break.
+    /// blank, an email has no `@`, the URL is not a valid link (see
+    /// [`Url::new`]), or a field holds a control character other than a
+    /// tab or line break.
     pub fn new(contact: Contact) -> Result<Self, PayloadError> {
-        contact.validate()?;
-        Ok(Self(contact))
+        Ok(Self(contact.validate()?))
     }
 }
 
@@ -177,10 +181,11 @@ impl MeCard {
     /// As [`VCard::new`], and [`PayloadError::Inconsistent`] when the
     /// contact has an organisation or a title.
     pub fn new(contact: Contact) -> Result<Self, PayloadError> {
-        contact.validate()?;
+        let contact = contact.validate()?;
         if contact.org.is_some() || contact.title.is_some() {
-            return Err(PayloadError::Inconsistent(
-                "a mecard has no organisation or title; use a vcard",
+            return Err(PayloadError::inconsistent(
+                "a mecard has no organisation or title",
+                Some("use qr vcard for --org and --title"),
             ));
         }
         Ok(Self(contact))
@@ -256,7 +261,7 @@ mod tests {
     fn mecard_refuses_vcard_only_fields() {
         assert!(matches!(
             MeCard::new(full()),
-            Err(PayloadError::Inconsistent(_))
+            Err(PayloadError::Inconsistent { .. })
         ));
     }
 
@@ -303,5 +308,22 @@ mod tests {
             ..Contact::new("A")
         };
         assert!(VCard::new(blank_email).is_err());
+    }
+
+    #[test]
+    fn urls_are_normalised_like_qr_url() {
+        let with_url = |url: &str| Contact {
+            url: Some(url.into()),
+            ..Contact::new("A")
+        };
+        let card = VCard::new(with_url("example.com/a")).unwrap().to_string();
+        assert!(card.contains("URL:https://example.com/a\r\n"), "{card}");
+        let card = MeCard::new(with_url("example.com")).unwrap().to_string();
+        assert!(card.contains("URL:https\\://example.com;"), "{card}");
+        assert!(matches!(
+            VCard::new(with_url("javascript:alert(1)")),
+            Err(PayloadError::Invalid { field: "URL", .. })
+        ));
+        assert!(VCard::new(with_url("https://exa mple.com")).is_err());
     }
 }

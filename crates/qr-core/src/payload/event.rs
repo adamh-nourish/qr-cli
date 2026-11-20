@@ -64,20 +64,22 @@ impl Event {
             match start_time.compare(end_time) {
                 Some(Ordering::Less) => {}
                 Some(_) if start_time.is_date() => {
-                    return Err(PayloadError::Inconsistent(
-                        "the event must end after it starts (an all-day end date is \
-                         exclusive: a one-day event ends the next day)",
+                    return Err(PayloadError::inconsistent(
+                        "the event must end after it starts",
+                        Some("an all-day end date is exclusive: a one-day event ends the next day"),
                     ));
                 }
                 Some(_) => {
-                    return Err(PayloadError::Inconsistent(
+                    return Err(PayloadError::inconsistent(
                         "the event must end after it starts",
+                        None,
                     ));
                 }
                 None => {
-                    return Err(PayloadError::Inconsistent(
+                    return Err(PayloadError::inconsistent(
                         "the start and end must both be dates, both have a UTC offset \
                          or both have none",
+                        Some("for example --start 2026-11-20T15:00 --end 2026-11-20T16:00"),
                     ));
                 }
             }
@@ -122,6 +124,7 @@ fn parse_time(field: &'static str, value: &str) -> Result<DateTime, PayloadError
             field,
             value: value.to_owned(),
             reason: err.reason(),
+            hint: None,
         })
 }
 
@@ -199,8 +202,8 @@ mod tests {
         }
         assert!(
             err("2026-01-02", Some("2026-01-02"))
-                .to_string()
-                .contains("exclusive")
+                .hint()
+                .is_some_and(|h| h.contains("exclusive"))
         );
         assert_eq!(
             err("2026-01-01T10:00Z", Some("2026-01-01T09:00Z")).to_string(),

@@ -25,6 +25,20 @@ pub enum PayloadError {
         character: char,
     },
 
+    /// A field holds a bidirectional formatting character (such as U+202E,
+    /// right-to-left override), which can make a phone show the text in a
+    /// misleading order.
+    #[error(
+        "the {field} contains the bidirectional formatting character U+{:04X}",
+        u32::from(*.character)
+    )]
+    BidiCharacter {
+        /// The field.
+        field: &'static str,
+        /// The offending character.
+        character: char,
+    },
+
     /// A field is longer than the format allows.
     #[error("the {field} is {len} bytes long; the most is {max}")]
     TooLong {
@@ -45,6 +59,8 @@ pub enum PayloadError {
         value: String,
         /// What is wrong with it, as a lowercase phrase.
         reason: &'static str,
+        /// What to do about it, if there is one obvious fix.
+        hint: Option<&'static str>,
     },
 
     /// A secret is malformed. Unlike [`Self::Invalid`], the value is not
@@ -53,13 +69,21 @@ pub enum PayloadError {
     InvalidSecret {
         /// The field.
         field: &'static str,
-        /// What is wrong with it.
-        reason: &'static str,
+        /// What is wrong with it. It may give the secret's length, never
+        /// its content.
+        reason: String,
+        /// What to do about it, if there is one obvious fix.
+        hint: Option<&'static str>,
     },
 
     /// The fields do not make sense together.
-    #[error("{0}")]
-    Inconsistent(&'static str),
+    #[error("{message}")]
+    Inconsistent {
+        /// What is wrong.
+        message: &'static str,
+        /// What to do about it, if there is one obvious fix.
+        hint: Option<&'static str>,
+    },
 }
 
 impl PayloadError {
@@ -68,6 +92,40 @@ impl PayloadError {
             field,
             value: value.to_owned(),
             reason,
+            hint: None,
+        }
+    }
+
+    pub(crate) fn invalid_with_hint(
+        field: &'static str,
+        value: &str,
+        reason: &'static str,
+        hint: &'static str,
+    ) -> Self {
+        Self::Invalid {
+            field,
+            value: value.to_owned(),
+            reason,
+            hint: Some(hint),
+        }
+    }
+
+    pub(crate) const fn inconsistent(message: &'static str, hint: Option<&'static str>) -> Self {
+        Self::Inconsistent { message, hint }
+    }
+
+    /// One suggestion for fixing the input, kept apart from the message so
+    /// that callers can show it as a hint.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::ControlCharacter { .. } => Some("remove the control character from the value"),
+            Self::BidiCharacter { .. } => Some(
+                "remove it: it can make the text display in a different order from what it holds",
+            ),
+            Self::Invalid { hint, .. }
+            | Self::InvalidSecret { hint, .. }
+            | Self::Inconsistent { hint, .. } => *hint,
+            Self::Empty { .. } | Self::TooLong { .. } => None,
         }
     }
 }
@@ -106,14 +164,33 @@ mod tests {
         assert_eq!(
             PayloadError::InvalidSecret {
                 field: "password",
-                reason: "too short"
+                reason: "too short".to_owned(),
+                hint: None,
             }
             .to_string(),
             "invalid password: too short"
         );
         assert_eq!(
-            PayloadError::Inconsistent("the event ends before it starts").to_string(),
+            PayloadError::inconsistent("the event ends before it starts", Some("swap them"))
+                .to_string(),
             "the event ends before it starts"
+        );
+    }
+
+    #[test]
+    fn hints_are_kept_apart_from_messages() {
+        let err = PayloadError::invalid_with_hint("URL", "a b", "contains whitespace", "use %20");
+        assert_eq!(err.to_string(), "invalid URL 'a b': contains whitespace");
+        assert_eq!(err.hint(), Some("use %20"));
+        assert_eq!(PayloadError::invalid("URL", "x", "bad").hint(), None);
+        assert_eq!(PayloadError::Empty { field: "SSID" }.hint(), None);
+        assert!(
+            PayloadError::ControlCharacter {
+                field: "SSID",
+                character: '\n'
+            }
+            .hint()
+            .is_some()
         );
     }
 }

@@ -203,9 +203,7 @@ impl CliError {
                 "pipe it in, for example: qr wifi --ssid NAME --password-stdin < password.txt"
                     .to_owned(),
             ),
-            Self::Payload(PayloadError::ControlCharacter { .. }) => {
-                Some("remove the control character from the value".to_owned())
-            }
+            Self::Payload(e) => e.hint().map(str::to_owned),
             Self::Encode(EncodeError::DataTooLong(e)) if e.ec_level != EcLevel::L => Some(format!(
                 "shorten the input or lower --ec (now {}; at L it holds up to {} {})",
                 e.ec_level,
@@ -262,13 +260,12 @@ impl CliError {
             Self::Verify { error, .. } if !matches!(error, VerifyError::Render(_)) => {
                 Some("this is a bug; please report it".to_owned())
             }
-            // A render or payload error's message already says what to change.
+            // A render error's message already says what to change.
             Self::Verify { .. }
             | Self::ReadInput { .. }
             | Self::Output(_)
             | Self::WriteFile { .. }
-            | Self::Render(_)
-            | Self::Payload(_) => None,
+            | Self::Render(_) => None,
         }
     }
 }

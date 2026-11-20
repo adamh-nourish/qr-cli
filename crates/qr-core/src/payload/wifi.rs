@@ -111,8 +111,9 @@ impl Wifi {
         if let Some(password) = password {
             check_password(password, auth)?;
         } else if auth != WifiAuth::NoPass {
-            return Err(PayloadError::Inconsistent(
-                "a wpa or wep network needs a password; use --auth nopass for an open network",
+            return Err(PayloadError::inconsistent(
+                "a wpa or wep network needs a password",
+                Some("pass --password-stdin (or --password), or --auth nopass for an open network"),
             ));
         }
         Ok(Self {
@@ -167,8 +168,9 @@ impl fmt::Display for Wifi {
 fn check_password(password: &str, auth: WifiAuth) -> Result<(), PayloadError> {
     const FIELD: &str = "password";
     if auth == WifiAuth::NoPass {
-        return Err(PayloadError::Inconsistent(
+        return Err(PayloadError::inconsistent(
             "an open (nopass) network takes no password",
+            Some("drop the password, or pass --auth wpa or --auth wep"),
         ));
     }
     if let Some(character) = password.chars().find(|c| c.is_control()) {
@@ -188,13 +190,17 @@ fn check_password(password: &str, auth: WifiAuth) -> Result<(), PayloadError> {
     if ok {
         Ok(())
     } else {
+        // The length is not secret enough to hide, but the value is.
+        let rule = if auth == WifiAuth::Wpa {
+            "a wpa password has 8 to 63 characters, or 64 hex digits"
+        } else {
+            "a wep key has 5 or 13 characters, or 10 or 26 hex digits"
+        };
+        let plural = if len == 1 { "" } else { "s" };
         Err(PayloadError::InvalidSecret {
             field: FIELD,
-            reason: if auth == WifiAuth::Wpa {
-                "a wpa password has 8 to 63 characters, or 64 hex digits"
-            } else {
-                "a wep key has 5 or 13 characters, or 10 or 26 hex digits"
-            },
+            reason: format!("{rule} (got {len} character{plural})"),
+            hint: None,
         })
     }
 }
@@ -256,6 +262,11 @@ mod tests {
             let err = Wifi::new("n", Some(password), auth, false).unwrap_err();
             assert!(matches!(err, PayloadError::InvalidSecret { .. }), "{err}");
             assert!(!err.to_string().contains(password));
+            let len = password.chars().count();
+            assert!(
+                err.to_string().contains(&format!("(got {len} characters)")),
+                "{err}"
+            );
         }
     }
 
@@ -286,11 +297,11 @@ mod tests {
         ));
         assert!(matches!(
             Wifi::new("a", None, WifiAuth::Wpa, false),
-            Err(PayloadError::Inconsistent(_))
+            Err(PayloadError::Inconsistent { .. })
         ));
         assert!(matches!(
             Wifi::new("a", Some("12345678"), WifiAuth::NoPass, false),
-            Err(PayloadError::Inconsistent(_))
+            Err(PayloadError::Inconsistent { .. })
         ));
     }
 

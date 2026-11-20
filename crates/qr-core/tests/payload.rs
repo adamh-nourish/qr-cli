@@ -142,7 +142,11 @@ proptest! {
     }
 
     #[test]
-    fn mecard_fields_round_trip(name in tricky(), note in tricky_multiline(), url in tricky()) {
+    fn mecard_fields_round_trip(
+        name in tricky(),
+        note in tricky_multiline(),
+        url in "[a-z]{1,8}\\.com/[;,:'&?=#@/+a-z%]{0,16}",
+    ) {
         let card = MeCard::new(Contact {
             note: Some(note.clone()),
             url: Some(url.clone()),
@@ -156,7 +160,7 @@ proptest! {
             got,
             vec![
                 ("N".to_owned(), name.trim().to_owned()),
-                ("URL".to_owned(), url),
+                ("URL".to_owned(), format!("https://{url}")),
                 ("NOTE".to_owned(), note),
             ]
         );

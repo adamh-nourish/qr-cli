@@ -36,11 +36,11 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
-use clap::{CommandFactory as _, Parser as _};
+use clap::{CommandFactory as _, Parser as _, Subcommand as _};
 use qr_core::{sanitize_for_terminal, sanitize_lines_for_terminal};
 
 pub use crate::cli::Cli;
-use crate::cli::Command;
+use crate::cli::{Command, PayloadCommand};
 use crate::diag::{Reporter, Verbosity};
 pub use crate::env::Env;
 pub use crate::error::CliError;
@@ -70,9 +70,25 @@ where
     T: Into<OsString> + Clone,
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
-    let cli = match Cli::try_parse_from(&args) {
+    let parsed = Cli::try_parse_from(&args);
+    let misplaced = match &parsed {
+        // `qr -o a.png wifi` parses as TEXT 'wifi'; `qr -o a.png tel 1`
+        // fails on the stray '1'. Either way the user meant the subcommand.
+        Ok(cli) if cli.command.is_none() && cli.generate.text.is_some() => {
+            misplaced_subcommand(&args)
+        }
+        Err(err) if err.use_stderr() => misplaced_subcommand(&args),
+        _ => None,
+    };
+    if let Some(misplaced) = misplaced {
+        Reporter::new(&mut *ctx.stderr, false, Verbosity::Normal)
+            .with_json(wants_json(&args))
+            .error("usage", &misplaced.message(), Some(&misplaced.hint()));
+        return ExitStatus::Usage;
+    }
+    let cli = match parsed {
         Ok(cli) => cli,
-        Err(err) => return report_parse_error(&err, wants_json(&args), ctx),
+        Err(err) => return report_parse_error(&err, &args, ctx),
     };
 
     let Context {
@@ -142,7 +158,9 @@ fn wants_json(args: &[OsString]) -> bool {
 }
 
 /// Prints a clap error (or `--help`/`--version` output) and picks the status.
-fn report_parse_error(err: &clap::Error, json: bool, ctx: &mut Context<'_>) -> ExitStatus {
+fn report_parse_error(err: &clap::Error, args: &[OsString], ctx: &mut Context<'_>) -> ExitStatus {
+    let json = wants_json(args);
+    let literal = literal_word_hint(err, args);
     if json && err.use_stderr() {
         let extra = extra_argument(err);
         let message = extra.as_ref().map_or_else(
@@ -157,7 +175,7 @@ fn report_parse_error(err: &clap::Error, json: bool, ctx: &mut Context<'_>) -> E
             .then_some("quote text that contains spaces: qr 'hello world'");
         Reporter::new(&mut *ctx.stderr, false, Verbosity::Normal)
             .with_json(true)
-            .error("usage", &message, hint);
+            .error("usage", &message, hint.or(literal.as_deref()));
         return ExitStatus::Usage;
     }
     if let Some(extra) = extra_argument(err) {
@@ -178,6 +196,9 @@ fn report_parse_error(err: &clap::Error, json: bool, ctx: &mut Context<'_>) -> E
         let _ = ctx
             .stderr
             .write_all(sanitize_lines_for_terminal(&rendered).as_bytes());
+        if let Some(hint) = literal {
+            let _ = writeln!(ctx.stderr, "  hint: {hint}");
+        }
         ExitStatus::Usage
     } else {
         let written = ctx
@@ -223,6 +244,139 @@ fn extra_argument(err: &clap::Error) -> Option<String> {
         .get_subcommands()
         .any(|sub| sub.get_name() == word || sub.get_all_aliases().any(|alias| alias == word));
     (!is_subcommand).then(|| word.clone())
+}
+
+/// For `qr wifi` with its required fields missing: how to encode the word
+/// itself instead (DECISIONS §9.5).
+fn literal_word_hint(err: &clap::Error, args: &[OsString]) -> Option<String> {
+    if err.kind() != ErrorKind::MissingRequiredArgument {
+        return None;
+    }
+    let word = args.get(1)?.to_str()?;
+    is_payload_subcommand(word)
+        .then(|| format!("to encode the word '{word}' itself, run: qr -- {word}"))
+}
+
+/// Whether `word` names a payload subcommand (`wifi`, `url`, ...).
+fn is_payload_subcommand(word: &str) -> bool {
+    PayloadCommand::augment_subcommands(clap::Command::new("qr"))
+        .get_subcommands()
+        .any(|sub| sub.get_name() == word)
+}
+
+/// A payload subcommand written after options, as in `qr -o a.png wifi`.
+struct Misplaced {
+    /// The subcommand.
+    name: String,
+    /// The options before it.
+    before: Vec<String>,
+    /// Everything after it.
+    after: Vec<String>,
+}
+
+impl Misplaced {
+    fn message(&self) -> String {
+        format!("options go after the subcommand: '{}'", self.name)
+    }
+
+    /// The command line with the options moved after the subcommand.
+    fn hint(&self) -> String {
+        let words: Vec<String> = std::iter::once(self.name.clone())
+            .chain(redact_passwords(&self.after))
+            .chain(redact_passwords(&self.before))
+            .map(|w| shell_quote(&w))
+            .collect();
+        format!(
+            "run: qr {} (or put -- before '{}' to encode the word itself)",
+            words.join(" "),
+            self.name
+        )
+    }
+}
+
+/// Finds a payload subcommand name that is the first positional word but
+/// comes after options. Words after `--` are data, and option values (as
+/// in `-o wifi`) are skipped, so only a word clap took as TEXT matches.
+fn misplaced_subcommand(args: &[OsString]) -> Option<Misplaced> {
+    let mut command = Cli::command();
+    command.build();
+    let takes_value = |arg: &clap::Arg| arg.get_action().takes_values();
+    let long = |name: &str| {
+        command
+            .get_arguments()
+            .find(|a| a.get_long() == Some(name))
+            .is_some_and(takes_value)
+    };
+    let short = |c: char| {
+        command
+            .get_arguments()
+            .find(|a| a.get_short() == Some(c))
+            .is_some_and(takes_value)
+    };
+    let words: Vec<&str> = args
+        .iter()
+        .skip(1)
+        .map(|a| a.to_str())
+        .collect::<Option<_>>()?;
+    let mut i = 0;
+    while let Some(&word) = words.get(i) {
+        if word == "--" {
+            return None;
+        }
+        if let Some(name) = word.strip_prefix("--") {
+            if !name.contains('=') && long(name) {
+                i += 1;
+            }
+        } else if let Some(cluster) = word.strip_prefix('-').filter(|c| !c.is_empty()) {
+            // `-qo a.png`: the first flag that takes a value ends the cluster.
+            if let Some(at) = cluster
+                .char_indices()
+                .find(|&(_, c)| short(c))
+                .map(|(at, _)| at)
+            {
+                if at + 1 == cluster.len() {
+                    i += 1;
+                }
+            }
+        } else {
+            return (i > 0 && is_payload_subcommand(word)).then(|| Misplaced {
+                name: word.to_owned(),
+                before: words[..i].iter().map(|&w| w.to_owned()).collect(),
+                after: words[i + 1..].iter().map(|&w| w.to_owned()).collect(),
+            });
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Replaces `--password` values, so a corrected command line shown in a
+/// hint does not repeat a secret.
+fn redact_passwords(words: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(words.len());
+    let mut secret_next = false;
+    for word in words {
+        if std::mem::take(&mut secret_next) {
+            out.push("PASSWORD".to_owned());
+        } else if word.starts_with("--password=") {
+            out.push("--password=PASSWORD".to_owned());
+        } else {
+            secret_next = word == "--password";
+            out.push(word.clone());
+        }
+    }
+    out
+}
+
+/// Quotes `word` for a POSIX shell when it holds anything but plain
+/// characters.
+fn shell_quote(word: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./:=@+,%".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
 }
 
 #[cfg(test)]

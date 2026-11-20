@@ -63,7 +63,9 @@ pub(crate) fn build(
             }
             email.into()
         }
-        PayloadCommand::Sms(a) => Sms::new(&a.number, a.message.as_deref())?.into(),
+        PayloadCommand::Sms(a) => {
+            Sms::new(&a.number, a.message.as_deref().or(a.body.as_deref()))?.into()
+        }
         PayloadCommand::Tel(a) => Tel::new(&a.number)?.into(),
         PayloadCommand::Geo(a) => Geo::new(a.latitude, a.longitude)?.into(),
         PayloadCommand::Event(a) => {
@@ -115,7 +117,8 @@ pub(crate) fn read_secret(stdin: &mut dyn Read, stdin_is_tty: bool) -> Result<St
     if bytes.len() > MAX_SECRET_BYTES {
         return Err(PayloadError::InvalidSecret {
             field: FIELD,
-            reason: "stdin holds more than 1024 bytes",
+            reason: "stdin holds more than 1024 bytes".to_owned(),
+            hint: Some("pipe in only the password, followed by at most one newline"),
         }
         .into());
     }
@@ -125,10 +128,22 @@ pub(crate) fn read_secret(stdin: &mut dyn Read, stdin_is_tty: bool) -> Result<St
             bytes.pop();
         }
     }
+    if bytes.is_empty() {
+        return Err(PayloadError::InvalidSecret {
+            field: FIELD,
+            reason: "stdin is empty".to_owned(),
+            hint: Some(
+                "pipe the password in, for example: qr wifi --ssid NAME --password-stdin \
+                 < password.txt (or use --auth nopass for an open network)",
+            ),
+        }
+        .into());
+    }
     String::from_utf8(bytes).map_err(|_| {
         PayloadError::InvalidSecret {
             field: FIELD,
-            reason: "it is not valid UTF-8",
+            reason: "it is not valid UTF-8".to_owned(),
+            hint: None,
         }
         .into()
     })
@@ -204,7 +219,7 @@ mod tests {
                 &[
                     "mecard", "Ada", "--phone", "1", "--email", "a@b", "--url", "x.io",
                 ],
-                "MECARD:N:Ada;TEL:1;EMAIL:a@b;URL:x.io;;",
+                "MECARD:N:Ada;TEL:1;EMAIL:a@b;URL:https\\://x.io;;",
             ),
             (
                 &[
@@ -321,13 +336,14 @@ mod tests {
 
     #[test]
     fn print_is_exact_off_a_terminal_and_safe_on_one() {
-        let payload: Payload = Sms::new("1", Some("a\r\nb\u{202e}")).unwrap().into();
+        // A lone CR is data a terminal would act on (it rewinds the line).
+        let payload: Payload = Sms::new("1", Some("a\r\nb\rc")).unwrap().into();
         let mut out = Vec::new();
         print(&payload, &mut out, false).unwrap();
-        assert_eq!(out, "SMSTO:1:a\r\nb\u{202e}\n".as_bytes());
+        assert_eq!(out, "SMSTO:1:a\r\nb\rc\n".as_bytes());
         let mut out = Vec::new();
         print(&payload, &mut out, true).unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), "SMSTO:1:a\nb\\u{202e}\n");
+        assert_eq!(String::from_utf8(out).unwrap(), "SMSTO:1:a\nb\\u{d}c\n");
         let card: Payload = VCard::new(Contact::new("A")).unwrap().into();
         let mut out = Vec::new();
         print(&card, &mut out, true).unwrap();

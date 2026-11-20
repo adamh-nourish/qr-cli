@@ -69,6 +69,9 @@ jobs:
           fi
           cargo +nightly fuzz run "$TARGET" -- \
             -max_total_time="$SECONDS_PER_TARGET" -max_len=8192 -timeout=30
+      # cargo fuzz has no --locked, so catch a silent re-resolution here.
+      - name: Check fuzz/Cargo.lock is unchanged
+        run: git diff --exit-code fuzz/Cargo.lock
       - name: Upload the crashing input
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
