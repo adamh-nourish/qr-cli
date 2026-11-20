@@ -39,9 +39,13 @@ fuzz_target!(|data: &[u8]| {
         matrix.is_dark(x, y)
     }));
     let mut decoded = Vec::new();
-    grid.decode_to(&mut decoded)
+    let meta = grid
+        .decode_to(&mut decoded)
         .expect("rqrr could not decode the symbol");
     assert_eq!(decoded, payload);
+    // The reported mask (recovered from the format information when the
+    // encoder chose it) is the one a scanner reads.
+    assert_eq!(meta.mask, u16::from(code.mask().number()));
     if let Some(mask) = mask {
         assert_eq!(code.mask(), mask);
     }

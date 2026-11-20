@@ -35,8 +35,8 @@ pub mod verify;
 pub use crate::capacity::max_chars;
 pub use crate::color::{Color, ColorError};
 pub use crate::contrast::{Contrast, MIN_CONTRAST};
-pub use crate::encode::{EncodePlan, FastQrEncoder, QrCode, QrEncoder, encode, plan};
-pub use crate::error::{CapacityError, EncodeError};
+pub use crate::encode::{EncodePlan, QrCode, QrEncoder, QrcodeEncoder, Segment, encode, plan};
+pub use crate::error::{CapacityError, CapacityUnit, EncodeError};
 pub use crate::matrix::{Matrix, MatrixError};
 pub use crate::options::{
     EcLevel, EncodeOptions, Mask, Mode, ModeChoice, OptionError, Version, VersionChoice,

@@ -152,7 +152,10 @@ impl FromStr for Version {
 }
 
 /// How data is packed into the symbol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Modes are ordered from narrowest to widest: every character a mode
+/// accepts is also accepted by every wider mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Mode {
     /// Digits `0-9` only; about 3.3 bits per character.
     Numeric,
@@ -231,7 +234,9 @@ impl fmt::Display for Mode {
 /// The user's choice of data mode: a fixed [`Mode`] or automatic selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ModeChoice {
-    /// Use the narrowest mode that represents all of the data.
+    /// Split the data into segments, each in the narrowest mode that holds
+    /// it, merging short runs where that is smaller (mixed-mode
+    /// segmentation, as the `qrcode` crate does).
     #[default]
     Auto,
     /// Use exactly this mode; data outside its character set is an error.

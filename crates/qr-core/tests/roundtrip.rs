@@ -87,6 +87,22 @@ proptest! {
         assert_round_trip(&data, &code);
     }
 
+    /// Mixed data is split into numeric, alphanumeric and byte segments;
+    /// the decoder must reassemble the input exactly and read the mask the
+    /// encoder recovered from the format information.
+    #[test]
+    fn segmented_data_round_trips(
+        data in "([0-9]{1,30}|[A-Z $%*+./:-]{1,20}|[a-z?&=]{1,10}|\\PC{1,3}){0,40}",
+        ec in ec_level(),
+        mask in mask(),
+    ) {
+        let options = EncodeOptions::default().with_ec_level(ec).with_mask(mask);
+        let code = encode(data.as_bytes(), &options).unwrap();
+        let covered: usize = code.segments().iter().map(qr_core::Segment::len).sum();
+        prop_assert_eq!(covered, data.len());
+        assert_round_trip(data.as_bytes(), &code);
+    }
+
     #[test]
     fn numeric_strings_round_trip(data in "[0-9]{0,1500}", ec in ec_level(), mask in mask()) {
         let options = EncodeOptions::default()
