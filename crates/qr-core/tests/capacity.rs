@@ -7,8 +7,8 @@
 
 use qr_core::capacity::{data_bits, max_chars};
 use qr_core::{
-    CapacityError, EcLevel, EncodeError, EncodeOptions, Mode, ModeChoice, Version, VersionChoice,
-    encode,
+    CapacityError, CapacityUnit, EcLevel, EncodeError, EncodeOptions, Mode, ModeChoice, Version,
+    VersionChoice, encode,
 };
 
 const MODES: [Mode; 3] = [Mode::Numeric, Mode::Alphanumeric, Mode::Byte];
@@ -67,9 +67,11 @@ fn every_exact_boundary_encodes_and_one_more_fails() {
                     EncodeError::DataTooLong(CapacityError {
                         needed: max + 1,
                         max,
+                        unit: CapacityUnit::Characters,
                         mode,
                         ec_level: ec,
                         version,
+                        bytes: max + 1,
                     })
                 );
             }
@@ -93,6 +95,14 @@ fn auto_version_limits_at_version_40() {
             (Mode::Byte, byte),
         ] {
             let options = EncodeOptions::default().with_ec_level(ec);
+            // Automatic mode would split the alphanumeric filler's digit
+            // runs into numeric segments, so use letters only.
+            let filler = |mode, len| match mode {
+                Mode::Alphanumeric => (0..len)
+                    .map(|i| b"ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:"[i % 35])
+                    .collect(),
+                _ => filler(mode, len),
+            };
             let code = encode(&filler(mode, max), &options).unwrap();
             assert_eq!(code.version(), Version::MAX);
             assert_eq!(code.mode(), mode);

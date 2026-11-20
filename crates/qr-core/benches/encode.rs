@@ -39,10 +39,9 @@ fn encode_v20_by_ec_level(bencher: divan::Bencher, ec: EcLevel) {
     bencher.bench(|| encode(black_box(&data), black_box(&options)));
 }
 
-/// Forced mask. With `fast_qr` this is no faster than the automatic mask
-/// (v20: 336 µs vs 334 µs), so mask selection is not a meaningful cost for
-/// this backend; the group guards against a backend whose mask search is
-/// expensive (as `qrcode`'s is, see `qrcode_reference`).
+/// Forced mask. `qrcode`'s automatic mask search draws and scores all
+/// eight masks, so forcing one skips most of the work: compare with
+/// `encode_by_version` to see what the lowest-penalty search costs.
 #[divan::bench(args = [5, 20, 40])]
 fn encode_fixed_mask(bencher: divan::Bencher, version: u8) {
     let (data, options) = full_payload(version, EcLevel::M);
@@ -50,12 +49,26 @@ fn encode_fixed_mask(bencher: divan::Bencher, version: u8) {
     bencher.bench(|| encode(black_box(&data), black_box(&options)));
 }
 
-/// The PR 2 bake-off, kept in the repo so the data behind the backend choice
-/// stays tracked (DECISIONS.md sections 1 and 5): the dev-only `qrcode` crate
-/// on the same full payloads, automatic mask, EC level M. Compare with
-/// `encode_by_version`.
+/// Mixed data that automatic mode splits into segments: a short URL with a
+/// numeric id, and a byte prefix on 1,000 digits (EC level M).
+#[divan::bench(args = ["url", "ref"])]
+fn encode_segmented(bencher: divan::Bencher, payload: &str) {
+    let data: Vec<u8> = if payload == "url" {
+        b"https://example.com/orders/1234567890123456".to_vec()
+    } else {
+        let mut data = b"ref:".to_vec();
+        data.extend((0..1_000).map(|i| b"0123456789"[i % 10]));
+        data
+    };
+    let options = EncodeOptions::default();
+    bencher.bench(|| encode(black_box(&data), black_box(&options)));
+}
+
+/// The `qrcode` crate called directly on the same full payloads (automatic
+/// mask, EC level M). The difference from `encode_by_version` is the cost
+/// of `qr_core`'s planning, segment hand-off and mask recovery.
 #[divan::bench(args = [5, 20, 40])]
-fn qrcode_reference(bencher: divan::Bencher, version: u8) {
+fn qrcode_direct(bencher: divan::Bencher, version: u8) {
     let (data, _) = full_payload(version, EcLevel::M);
     let qr_version = qrcode::Version::Normal(i16::from(version));
     bencher

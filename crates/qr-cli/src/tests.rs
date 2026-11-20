@@ -519,6 +519,32 @@ fn encoding_errors_map_to_exit_codes_with_hints() {
     assert!(o.err.contains("hint: use --mode auto"), "{}", o.err);
 }
 
+/// Mixed data is segmented, so its limit is exact in data bits.
+#[test]
+fn mixed_data_too_long_reports_bits_with_a_hint() {
+    let long = format!("ref:{}", "0123456789".repeat(500));
+    let o = run_piped(&["qr", "--ec", "Q", &long]);
+    assert_eq!(o.status, ExitStatus::DataTooLong);
+    assert!(
+        o.err.starts_with(
+            "error: data too long: 5004 bytes of mixed data need 16737 bits, \
+             which exceeds the maximum of 13328 bits at error correction level Q (version 40)"
+        ),
+        "{}",
+        o.err
+    );
+    assert!(
+        o.err.contains(
+            "hint: shorten the input or lower --ec (now Q; at L it holds up to 23648 bits)"
+        ),
+        "{}",
+        o.err
+    );
+    // The same data fits at M, as a byte segment and a numeric one.
+    let o = run_piped(&["qr", "--ec", "M", "-f", "text", &long]);
+    assert_eq!(o.status, ExitStatus::Success, "{}", o.err);
+}
+
 #[test]
 fn oversized_stdin_stops_reading_at_the_limit() {
     let big = vec![b'9'; crate::input::MAX_READ_BYTES + 1];

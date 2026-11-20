@@ -12,7 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-fast_qr.workspace = true
+# The production encoder (DECISIONS.md section 1).
+qrcode.workspace = true
 thiserror.workspace = true
 # Raster output (DECISIONS section 1): 1-bit/indexed or RGBA PNG, baseline
 # JPEG and, through `image` with only its WebP codec, lossless WebP.
@@ -27,8 +28,6 @@ rqrr.workspace = true
 divan.workspace = true
 proptest.workspace = true
 insta.workspace = true
-# Reference encoder for differential tests and the capacity-table cross-check.
-qrcode.workspace = true
 # Parses every generated SVG in the output-safety tests.
 roxmltree.workspace = true
 

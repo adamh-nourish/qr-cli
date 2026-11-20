@@ -123,3 +123,28 @@ fn verify_svg(bencher: divan::Bencher, version: u8) {
     let options = RenderOptions::default().with_shape(ModuleShape::Rounded);
     bencher.bench(|| verify_rendering(black_box(&matrix), &options, "svg", b""));
 }
+
+/// One batch item as PR 11 will run it: encode a payload (automatic mode,
+/// version and mask, EC M) and render a 256 px 1-bit PNG. Argument 0 is a
+/// short URL with a numeric id (version 2 or 3); 10, 20 and 40 are byte
+/// payloads that fill that version. The §5 batch target (2.5k codes/s on 4
+/// cores) is about 1.6 ms per item per core, so the estimate is
+/// `4 / median` codes per second, before I/O and scheduling overhead.
+#[divan::bench(args = [0, 10, 20, 40])]
+fn batch_item_png_256(bencher: divan::Bencher, version: u8) {
+    let data: Vec<u8> = if version == 0 {
+        b"https://example.com/item/000123".to_vec()
+    } else {
+        let version = Version::new(version).unwrap_or(Version::MAX);
+        let len = max_chars(Mode::Byte, version, EcLevel::M);
+        (0..len)
+            .map(|i| b"abcdefghijklmnopqrstuvwxyz/:."[i % 29])
+            .collect()
+    };
+    let encode_options = EncodeOptions::default();
+    let options = RenderOptions::default().with_size(Some(256));
+    bencher.bench(|| {
+        encode(black_box(&data), black_box(&encode_options))
+            .map(|code| render_raster(code.matrix(), RasterFormat::Png, &options))
+    });
+}

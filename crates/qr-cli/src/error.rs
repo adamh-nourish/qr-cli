@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use qr_core::payload::PayloadError;
 use qr_core::verify::VerifyError;
-use qr_core::{EcLevel, EncodeError, RenderError, max_chars};
+use qr_core::{EcLevel, EncodeError, RenderError};
 
 use crate::cli::OutputFormat;
 use crate::exit::ExitStatus;
@@ -207,8 +207,8 @@ impl CliError {
             Self::Encode(EncodeError::DataTooLong(e)) if e.ec_level != EcLevel::L => Some(format!(
                 "shorten the input or lower --ec (now {}; at L it holds up to {} {})",
                 e.ec_level,
-                max_chars(e.mode, e.version, EcLevel::L),
-                e.mode.unit()
+                e.max_at(EcLevel::L),
+                e.unit_name()
             )),
             Self::InputTooLong { .. } | Self::Encode(EncodeError::DataTooLong(_)) => {
                 Some("shorten the input".to_owned())
@@ -312,7 +312,7 @@ mod tests {
     use std::error::Error as _;
     use std::io;
 
-    use qr_core::{CapacityError, EcLevel, Mode, Version};
+    use qr_core::{CapacityError, CapacityUnit, EcLevel, Mode, Version};
 
     use super::*;
 
@@ -320,9 +320,11 @@ mod tests {
         CliError::Encode(EncodeError::DataTooLong(CapacityError {
             needed: 3_000,
             max: 2_953,
+            unit: CapacityUnit::Characters,
             mode: Mode::Byte,
             ec_level,
             version: Version::MAX,
+            bytes: 3_000,
         }))
     }
 
