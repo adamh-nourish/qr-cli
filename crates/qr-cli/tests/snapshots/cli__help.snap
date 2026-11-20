@@ -83,6 +83,25 @@ Options:
       --invert
           Swap dark and light modules (or --fg and --bg for images)
 
+      --shape <SHAPE>
+          How dark modules are drawn in png, jpeg, webp, svg, pdf and eps output; the three finder
+          patterns stay square
+
+          Possible values:
+          - square:  Full squares: the standard look
+          - rounded: Squares with their exposed corners rounded
+          - dots:    Circles
+          
+          [default: square]
+
+      --verify
+          Read the rendered code back with a decoder and fail (exit 6) unless it holds the input.
+          Automatic for images with a non-default --shape/--fg/--bg, --transparent or --invert. Text
+          output is checked as a plain module grid (the symbol, not the characters)
+
+      --no-verify
+          Skip the automatic read-back check
+
       --data-uri
           Print the image as a base64 data: URI instead of raw bytes [default format: svg]. With -o,
           the file holds the URI: use a .txt name
@@ -124,6 +143,8 @@ Examples:
   qr 'hi' -o code.svg          Write an SVG file (format from the extension)
   qr 'hi' --size 512 -o c.png  Write a 512x512 PNG image
   qr 'hi' -f pdf -o - > c.pdf  Write a PDF to stdout
+  qr 'hi' --shape dots --fg navy -o c.png
+                               Write a styled PNG (checked automatically)
   qr 'hi' --data-uri --json    Print a JSON object with an SVG data: URI
   qr -- help                   Encode a word that is also a command name,
                                such as 'help', 'man' or 'completions'

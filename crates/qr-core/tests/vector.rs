@@ -9,9 +9,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use proptest::prelude::*;
+use qr_core::verify::verify_rendering;
 use qr_core::{
-    Color, EncodeOptions, Matrix, RenderOptions, VectorFormat, encode, render_eps, render_pdf,
-    render_svg, render_vector,
+    Color, EncodeOptions, Matrix, ModuleShape, RenderOptions, VectorFormat, encode, render_eps,
+    render_pdf, render_svg, render_vector,
 };
 
 /// A module grid read back from a rendering, quiet zone included.
@@ -445,9 +446,11 @@ proptest! {
         fg in color(),
         bg in color(),
         transparent: bool,
+        shape in prop::sample::select(ModuleShape::ALL.to_vec()),
     ) {
         let code = encode(b"prop", &EncodeOptions::default()).unwrap();
         let options = RenderOptions::default()
+            .with_shape(shape)
             .with_title(title)
             .with_fg(fg)
             .with_bg(bg)
@@ -465,6 +468,20 @@ proptest! {
         let eps = render_eps(code.matrix(), &options).unwrap();
         prop_assert!(eps.is_ascii());
         prop_assert!(eps.lines().all(|l| l.len() <= 255));
+    }
+
+    /// Shaped output is drawn by our raster renderer for verification; the
+    /// same geometry must read back for any payload.
+    #[test]
+    fn arbitrary_payloads_verify_with_every_shape(
+        data in prop::collection::vec(any::<u8>(), 1..200),
+        shape in prop::sample::select(ModuleShape::ALL.to_vec()),
+    ) {
+        let code = encode(&data, &EncodeOptions::default()).unwrap();
+        let options = RenderOptions::default().with_shape(shape);
+        prop_assert!(verify_rendering(code.matrix(), &options, "svg", &data).is_ok());
+        let svg = render_svg(code.matrix(), &options).unwrap();
+        assert_safe_svg(&svg);
     }
 
     #[test]

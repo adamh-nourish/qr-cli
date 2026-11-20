@@ -3,13 +3,16 @@
 use super::MAX_PIXELS;
 use crate::matrix::Matrix;
 use crate::render::options::{MAX_CANVAS_SIDE, MAX_DPI, RenderError, RenderOptions};
+use crate::render::shape::{Glyph, ModuleShape};
 
 /// A square bitmap of light and dark pixels drawn from a [`Matrix`].
 ///
 /// The image is `side` pixels across: `pad` light pixels, then the symbol
 /// and its quiet zone at `scale` pixels per module, then the rest of the
 /// side as light pixels. `pad` is non-zero only when a target size is not a
-/// whole multiple of the module count.
+/// whole multiple of the module count. Each dark module is drawn with the
+/// options' [`ModuleShape`], sampled at pixel centres with no anti-aliasing,
+/// so the image keeps exactly two colours.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Canvas<'m> {
     matrix: &'m Matrix,
@@ -17,7 +20,12 @@ pub(crate) struct Canvas<'m> {
     pad: u32,
     margin: u32,
     scale: u32,
+    shape: ModuleShape,
 }
+
+/// Identifies a distinct pixel row: the matrix row and, for shaped modules,
+/// the pixel row within the module. Pixel rows with the same key are equal.
+pub(crate) type RowKey = Option<(usize, u32)>;
 
 impl<'m> Canvas<'m> {
     /// Checks `options` for `format` and returns the canvas to draw.
@@ -70,6 +78,7 @@ impl<'m> Canvas<'m> {
             pad: extra / 2,
             margin: layout.margin,
             scale: layout.scale,
+            shape: options.shape,
         })
     }
 
@@ -84,46 +93,56 @@ impl<'m> Canvas<'m> {
         self.scale
     }
 
-    /// The matrix row drawn on pixel row `y`, or `None` for a row of the
-    /// quiet zone or padding. Rows with the same key are identical.
-    pub(crate) fn source_row(&self, y: u32) -> Option<usize> {
-        let module = y.checked_sub(self.pad)? / self.scale;
+    /// The matrix row drawn on pixel row `y` and the pixel row within that
+    /// module row, or `None` for a row of the quiet zone or padding.
+    fn position(&self, y: u32) -> Option<(usize, u32)> {
+        let offset = y.checked_sub(self.pad)?;
+        let module = offset / self.scale;
         let row = usize::try_from(module.checked_sub(self.margin)?).ok()?;
-        (row < self.matrix.width()).then_some(row)
+        (row < self.matrix.width()).then_some((row, offset % self.scale))
+    }
+
+    /// The key of pixel row `y`: square modules repeat each module row
+    /// `scale` times, shaped modules differ from one pixel row to the next.
+    pub(crate) fn row_key(&self, y: u32) -> RowKey {
+        let (row, sub) = self.position(y)?;
+        Some((
+            row,
+            if self.shape == ModuleShape::Square {
+                0
+            } else {
+                sub
+            },
+        ))
     }
 
     /// Calls `run(dark, len)` for each run of equal pixels in row `y`, from
     /// left to right. Adjacent runs differ and the lengths add up to
     /// [`Self::side`].
-    pub(crate) fn row_runs(&self, y: u32, mut run: impl FnMut(bool, u32)) {
-        let Some(row) = self.source_row(y) else {
-            run(false, self.side);
+    pub(crate) fn row_runs(&self, y: u32, run: impl FnMut(bool, u32)) {
+        let mut runs = Runs::new(run);
+        let Some((row, sub)) = self.position(y) else {
+            runs.push(false, self.side);
+            runs.finish();
             return;
         };
-        let mut current = (false, self.pad + self.margin * self.scale);
-        let mut drawn = current.1;
+        runs.push(false, self.pad + self.margin * self.scale);
+        let mut drawn = runs.total;
         for x in 0..self.matrix.width() {
-            let dark = self.matrix.is_dark(x, row);
-            if dark == current.0 {
-                current.1 += self.scale;
+            if self.matrix.is_dark(x, row) {
+                let glyph = Glyph::for_module(self.matrix, self.shape, x, row);
+                let (start, end) = glyph.span(self.scale, sub);
+                runs.push(false, start);
+                runs.push(true, end - start);
+                runs.push(false, self.scale - end);
             } else {
-                if current.1 > 0 {
-                    run(current.0, current.1);
-                }
-                current = (dark, self.scale);
+                runs.push(false, self.scale);
             }
             drawn += self.scale;
         }
         // The right-hand quiet zone and padding.
-        let rest = self.side.saturating_sub(drawn);
-        if current.0 {
-            run(true, current.1);
-            if rest > 0 {
-                run(false, rest);
-            }
-        } else if current.1 + rest > 0 {
-            run(false, current.1 + rest);
-        }
+        runs.push(false, self.side.saturating_sub(drawn));
+        runs.finish();
     }
 
     /// Replaces `out` with row `y`, one `light` or `dark` value per pixel.
@@ -166,7 +185,7 @@ impl<'m> Canvas<'m> {
         let mut row = Vec::new();
         let mut last = None;
         for y in 0..self.side {
-            let key = Some(self.source_row(y));
+            let key = Some(self.row_key(y));
             if key != last {
                 render(y, &mut row);
                 last = key;
@@ -174,6 +193,46 @@ impl<'m> Canvas<'m> {
             emit(&row)?;
         }
         Ok(())
+    }
+}
+
+/// Merges pixel spans into maximal runs of one colour.
+struct Runs<F: FnMut(bool, u32)> {
+    emit: F,
+    current: (bool, u32),
+    total: u32,
+}
+
+impl<F: FnMut(bool, u32)> Runs<F> {
+    fn new(emit: F) -> Self {
+        Self {
+            emit,
+            current: (false, 0),
+            total: 0,
+        }
+    }
+
+    /// Adds `len` pixels; an empty span changes nothing.
+    fn push(&mut self, dark: bool, len: u32) {
+        if len == 0 {
+            return;
+        }
+        self.total += len;
+        if dark == self.current.0 {
+            self.current.1 += len;
+        } else {
+            if self.current.1 > 0 {
+                (self.emit)(self.current.0, self.current.1);
+            }
+            self.current = (dark, len);
+        }
+    }
+
+    /// Emits the last run.
+    fn finish(mut self) {
+        if self.current.1 > 0 {
+            (self.emit)(self.current.0, self.current.1);
+        }
     }
 }
 
@@ -209,10 +268,60 @@ mod tests {
                 "........",
             ]
         );
-        assert_eq!(canvas.source_row(0), None);
-        assert_eq!(canvas.source_row(2), Some(0));
-        assert_eq!(canvas.source_row(5), Some(1));
-        assert_eq!(canvas.source_row(6), None);
+        assert_eq!(canvas.row_key(0), None);
+        assert_eq!(canvas.row_key(2), Some((0, 0)));
+        assert_eq!(canvas.row_key(3), Some((0, 0)));
+        assert_eq!(canvas.row_key(5), Some((1, 0)));
+        assert_eq!(canvas.row_key(6), None);
+    }
+
+    #[test]
+    fn shaped_modules_are_drawn_per_pixel_row() {
+        let lone = Matrix::from_modules(1, vec![true]).unwrap();
+        let options = RenderOptions::default()
+            .with_margin(1)
+            .with_scale(6)
+            .with_shape(ModuleShape::Dots);
+        let canvas = Canvas::new(&lone, &options, "png", 1).unwrap();
+        assert_eq!(canvas.row_key(7), Some((0, 1)));
+        let rows = rows(&canvas);
+        assert_eq!(rows[5], "..................");
+        assert_eq!(rows[6], "........##........");
+        assert_eq!(rows[7], ".......####.......");
+        assert_eq!(rows[8], "......######......");
+        assert_eq!(rows[11], "........##........");
+        assert_eq!(rows[12], "..................");
+
+        // Runs still cover the row exactly, with no empty or repeated runs.
+        for shape in ModuleShape::ALL {
+            let code = crate::encode(b"shape runs", &crate::EncodeOptions::default()).unwrap();
+            let options = RenderOptions::default()
+                .with_margin(0)
+                .with_size(Some(110))
+                .with_shape(shape);
+            let canvas = Canvas::new(code.matrix(), &options, "png", 1).unwrap();
+            for y in 0..canvas.side() {
+                let mut runs = Vec::new();
+                canvas.row_runs(y, |dark, len| runs.push((dark, len)));
+                assert_eq!(runs.iter().map(|r| r.1).sum::<u32>(), canvas.side());
+                assert!(runs.iter().all(|r| r.1 > 0), "{runs:?}");
+                assert!(runs.windows(2).all(|w| w[0].0 != w[1].0), "{runs:?}");
+            }
+        }
+
+        // Shaped rows are built once per pixel row, not once per module row.
+        let canvas = Canvas::new(&lone, &options, "png", 1).unwrap();
+        let mut built = 0;
+        let result: Result<(), ()> = canvas.for_each_row(
+            |y, row| {
+                built += 1;
+                canvas.fill_row(y, 0_u8, 1, row);
+            },
+            |_| Ok(()),
+        );
+        assert_eq!(result, Ok(()));
+        // Quiet zone above, six rows of the dot, quiet zone below.
+        assert_eq!(built, 8);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! The page is `side × side` points. The content stream paints the
 //! background, then sets a transform to module units with the origin at the
 //! top-left (matching the [`Matrix`] coordinates) and fills one rectangle per
-//! dark run. Translucent colours use an `ExtGState` with a fill alpha (`/ca`).
+//! dark run, or the outline of each rounded run or dot (cubic Béziers). Translucent colours use an `ExtGState` with a fill alpha (`/ca`).
 //! The stream is uncompressed, so the file has no dependencies and is easy to
 //! inspect. The only string written is the escaped `/Title`.
 
@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 
 use super::escape;
 use super::options::{MAX_CANVAS_SIDE, RenderError, RenderOptions};
-use super::runs::dark_runs;
+use super::outline::{Num, Primitive, Segment, primitives};
 use crate::color::Color;
 use crate::matrix::Matrix;
 
@@ -46,20 +46,13 @@ pub fn render_pdf(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, R
         paint(&mut content, &mut ext_g_state, "Gb", background);
         let _ = writeln!(content, "0 0 {side} {side} re f");
     }
-    let mut runs = dark_runs(matrix).peekable();
-    if !foreground.is_invisible() && runs.peek().is_some() {
+    let mut shapes = primitives(matrix, options.shape, layout.margin).peekable();
+    if !foreground.is_invisible() && shapes.peek().is_some() {
         paint(&mut content, &mut ext_g_state, "Gf", foreground);
         let s = layout.scale;
         let _ = writeln!(content, "{s} 0 0 -{s} 0 {side} cm");
-        let margin = layout.margin;
-        for run in runs {
-            let _ = writeln!(
-                content,
-                "{} {} {} 1 re",
-                run.x + margin,
-                run.y + margin,
-                run.len
-            );
+        for primitive in shapes {
+            draw(&mut content, primitive);
         }
         content.push_str("f\n");
     }
@@ -93,6 +86,32 @@ pub fn render_pdf(matrix: &Matrix, options: &RenderOptions) -> Result<Vec<u8>, R
         info,
     ];
     Ok(assemble(&objects))
+}
+
+/// Appends `primitive` to the current path, in module units.
+fn draw(content: &mut String, primitive: Primitive) {
+    match primitive {
+        Primitive::Rect(run) => {
+            let _ = writeln!(content, "{} {} {} 1 re", run.x, run.y, run.len);
+        }
+        Primitive::Shape(kind) => kind.outline(|segment| {
+            let _ = match segment {
+                Segment::Move(p) => writeln!(content, "{} {} m", Num(p.x), Num(p.y)),
+                Segment::Line(p) => writeln!(content, "{} {} l", Num(p.x), Num(p.y)),
+                Segment::Cubic(a, b, p) => writeln!(
+                    content,
+                    "{} {} {} {} {} {} c",
+                    Num(a.x),
+                    Num(a.y),
+                    Num(b.x),
+                    Num(b.y),
+                    Num(p.x),
+                    Num(p.y)
+                ),
+                Segment::Close => writeln!(content, "h"),
+            };
+        }),
+    }
 }
 
 /// Sets the fill colour (and, for a translucent colour, a graphics state
@@ -160,6 +179,25 @@ mod tests {
         assert!(pdf.contains("/Resources << >>"));
         assert!(pdf.contains("/Producer (qr-core "));
         assert!(!pdf.contains("/Title"));
+    }
+
+    #[test]
+    fn shapes_are_drawn_as_curves() {
+        use crate::render::shape::ModuleShape;
+        let lone = Matrix::from_modules(1, vec![true]).unwrap();
+        let options = RenderOptions::default()
+            .with_margin(1)
+            .with_scale(5)
+            .with_shape(ModuleShape::Dots);
+        let pdf = text(&render_pdf(&lone, &options).unwrap());
+        assert!(
+            pdf.contains("5 0 0 -5 0 15 cm\n1.95 1.5 m\n1.95 1.7485 1.7485 1.95 1.5 1.95 c\n"),
+            "{pdf}"
+        );
+        assert!(pdf.contains("1.95 1.5 c\nh\nf\nQ\n"), "{pdf}");
+        let rounded = text(&render_pdf(&lone, &options.with_shape(ModuleShape::Rounded)).unwrap());
+        assert!(rounded.contains("1.5 1 m\n1.5 1 l\n"), "{rounded}");
+        assert_eq!(rounded.matches(" c\n").count(), 4, "{rounded}");
     }
 
     #[test]

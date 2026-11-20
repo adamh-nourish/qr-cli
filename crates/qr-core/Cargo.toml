@@ -18,7 +18,10 @@ thiserror.workspace = true
 # JPEG and, through `image` with only its WebP codec, lossless WebP.
 png.workspace = true
 jpeg-encoder.workspace = true
-image = { workspace = true, features = ["webp"] }
+# Decoding our own PNG, JPEG and WebP output for --verify, which reads it
+# back with rqrr.
+image = { workspace = true, features = ["png", "jpeg", "webp"] }
+rqrr.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
@@ -26,9 +29,6 @@ proptest.workspace = true
 insta.workspace = true
 # Reference encoder for differential tests and the capacity-table cross-check.
 qrcode.workspace = true
-rqrr.workspace = true
-# Decodes every raster format back to pixels for the rqrr round-trip tests.
-image = { workspace = true, features = ["png", "jpeg", "webp"] }
 # Parses every generated SVG in the output-safety tests.
 roxmltree.workspace = true
 

@@ -12,9 +12,11 @@
 mod eps;
 mod escape;
 mod options;
+mod outline;
 mod pdf;
-mod raster;
+pub(crate) mod raster;
 mod runs;
+mod shape;
 mod svg;
 mod text;
 mod vector;
@@ -29,6 +31,7 @@ pub use self::raster::{
     JPEG_MIN_SCALE, JPEG_QUALITY, MAX_PIXELS, RasterFormat, UnknownRasterFormat, render_jpeg,
     render_png, render_raster, render_webp,
 };
+pub use self::shape::{DOT_DIAMETER, ModuleShape, UnknownModuleShape};
 pub use self::svg::render_svg;
 pub use self::text::{DEFAULT_MARGIN, MAX_MARGIN, TextFormat, TextOptions, render_text};
 pub use self::vector::{UnknownVectorFormat, VectorFormat, render_vector};

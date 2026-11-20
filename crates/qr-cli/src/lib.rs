@@ -10,6 +10,8 @@
 //! - [`input`]: input resolution and bounded reads;
 //! - [`output`]: output format resolution, atomic file writes, `data:`
 //!   URIs and the `--json` objects;
+//! - `style` and `verify`: colour and shape options, contrast warnings and
+//!   the `--verify` read-back check;
 //! - [`diag`]: errors, warnings and notes on stderr;
 //! - [`env`](mod@env): terminal and environment detection;
 //! - [`error`] and [`exit`]: typed errors and the exit status contract.
@@ -24,7 +26,9 @@ pub mod exit;
 mod generate;
 pub mod input;
 pub mod output;
+mod style;
 mod tooling;
+mod verify;
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
