@@ -6,7 +6,7 @@ use qr_core::EcLevel;
 use qr_core::loader::load_image;
 use qr_core::logo::Logo;
 
-use crate::cli::{OutputFormat, RenderArgs};
+use crate::cli::{OutputFormat, StyleArgs};
 use crate::diag::Reporter;
 use crate::error::CliError;
 use crate::input::open_regular_file;
@@ -22,7 +22,7 @@ pub(crate) const LOGO_EC: EcLevel = EcLevel::H;
 /// # Errors
 ///
 /// [`CliError::LogoNeedsImage`] for any other format.
-pub(crate) fn check_format(args: &RenderArgs, format: OutputFormat) -> Result<(), CliError> {
+pub(crate) fn check_format(args: &StyleArgs, format: OutputFormat) -> Result<(), CliError> {
     let carries = match format.renderer() {
         Renderer::Raster(_) => true,
         Renderer::Vector(vector) => vector == qr_core::VectorFormat::Svg,
@@ -38,7 +38,7 @@ pub(crate) fn check_format(args: &RenderArgs, format: OutputFormat) -> Result<()
 /// a logo. A note (`-v`) says so when `--ec` was not given; a lower `--ec`
 /// is overridden with a warning, since the logo would otherwise leave too
 /// little redundancy to read.
-pub(crate) fn ec_level(args: &RenderArgs, reporter: &mut Reporter<'_>) -> EcLevel {
+pub(crate) fn ec_level(args: &StyleArgs, reporter: &mut Reporter<'_>) -> EcLevel {
     let asked = args.ec_level;
     if args.logo.is_none() {
         return asked.unwrap_or(EcLevel::M);
@@ -72,7 +72,7 @@ pub(crate) fn ec_level(args: &RenderArgs, reporter: &mut Reporter<'_>) -> EcLeve
 ///
 /// [`CliError::ReadLogo`] if the file cannot be opened or is not a regular
 /// file; [`CliError::Logo`] if it is not an acceptable image.
-pub(crate) fn load(args: &RenderArgs) -> Result<Option<Logo>, CliError> {
+pub(crate) fn load(args: &StyleArgs) -> Result<Option<Logo>, CliError> {
     let Some(path) = args.logo.as_deref() else {
         return Ok(None);
     };
@@ -103,11 +103,11 @@ mod tests {
     use crate::cli::Cli;
     use crate::diag::Verbosity;
 
-    fn args(extra: &[&str]) -> RenderArgs {
+    fn args(extra: &[&str]) -> StyleArgs {
         let mut argv = vec!["qr"];
         argv.extend_from_slice(extra);
         argv.push("x");
-        Cli::try_parse_from(argv).unwrap().generate.render
+        Cli::try_parse_from(argv).unwrap().generate.render.style
     }
 
     fn ec(extra: &[&str]) -> (EcLevel, String) {

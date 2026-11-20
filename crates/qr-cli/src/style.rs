@@ -5,13 +5,13 @@
 use qr_core::render::DEFAULT_SCALE;
 use qr_core::{Color, MIN_CONTRAST, ModuleShape, RenderOptions};
 
-use crate::cli::RenderArgs;
+use crate::cli::StyleArgs;
 use crate::diag::Reporter;
 use crate::output::Renderer;
 
 /// The renderer options selected by the flags. `--invert` swaps the
 /// colours, so it composes with `--fg` and `--bg`.
-pub(crate) fn render_options(args: &RenderArgs) -> RenderOptions {
+pub(crate) fn render_options(args: &StyleArgs) -> RenderOptions {
     let (mut fg, mut bg) = (
         args.fg.unwrap_or(Color::BLACK),
         args.bg.unwrap_or(Color::WHITE),
@@ -45,7 +45,7 @@ pub(crate) fn is_styled(options: &RenderOptions) -> bool {
 /// a contrast ratio below [`MIN_CONTRAST`], or a foreground lighter than
 /// the background.
 pub(crate) fn warn_contrast(
-    args: &RenderArgs,
+    args: &StyleArgs,
     options: &RenderOptions,
     renderer: Renderer,
     reporter: &mut Reporter<'_>,
@@ -101,11 +101,11 @@ mod tests {
     use crate::cli::Cli;
     use crate::diag::Verbosity;
 
-    fn args(extra: &[&str]) -> RenderArgs {
+    fn args(extra: &[&str]) -> StyleArgs {
         let mut argv = vec!["qr"];
         argv.extend_from_slice(extra);
         argv.push("x");
-        Cli::try_parse_from(argv).unwrap().generate.render
+        Cli::try_parse_from(argv).unwrap().generate.render.style
     }
 
     fn warnings(extra: &[&str], renderer: Renderer) -> String {

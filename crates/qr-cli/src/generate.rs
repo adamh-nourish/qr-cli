@@ -10,7 +10,7 @@ use qr_core::{
     render_raster, render_text, render_vector,
 };
 
-use crate::cli::{ColorChoice, OutputFormat, PayloadCommand, RenderArgs, Shape};
+use crate::cli::{ColorChoice, OutputFormat, PayloadCommand, RenderArgs, Shape, StyleArgs};
 use crate::diag::Reporter;
 use crate::env::Env;
 use crate::error::CliError;
@@ -56,9 +56,10 @@ impl Generate<'_, '_> {
 
         // Output and logo errors come first, before stdin is consumed.
         let plan = Plan::resolve(args, env.stdout_is_tty, reporter)?;
-        logo::check_format(args, plan.format)?;
-        let logo = logo::load(args)?;
-        let ec_level = logo::ec_level(args, reporter);
+        let style = &args.style;
+        logo::check_format(style, plan.format)?;
+        let logo = logo::load(style)?;
+        let ec_level = logo::ec_level(style, reporter);
 
         let input = match source {
             Source::Input(request) => read_input(&request, stdin, env.stdin_is_tty)?,
@@ -70,36 +71,25 @@ impl Generate<'_, '_> {
                 }
             }
         };
-        let code = encode(&input.data, &encode_options(args).with_ec_level(ec_level))?;
+        let code = encode(&input.data, &encode_options(style).with_ec_level(ec_level))?;
         reporter.note("encoded", &describe(&input, &code));
+        warn_margin(style, reporter);
 
-        if usize::from(args.margin) < DEFAULT_MARGIN {
-            reporter.warn(
-                "margin_below_quiet_zone",
-                &format!(
-                    "a margin of {} is below the {DEFAULT_MARGIN}-module quiet zone \
-                     the standard requires; some scanners may fail",
-                    args.margin
-                ),
-                Some("use --margin 4"),
-            );
-        }
-
-        let options = style::render_options(args).with_logo(logo);
+        let options = style::render_options(style).with_logo(logo);
         let renderer = plan.format.renderer();
         let bytes = match renderer {
             Renderer::Raster(format) => {
-                warn_lost_settings(args, plan.format, reporter);
-                style::warn_contrast(args, &options, renderer, reporter);
+                warn_lost_settings(style, plan.format, reporter);
+                style::warn_contrast(style, &options, renderer, reporter);
                 render_raster(code.matrix(), format, &options)?
             }
             Renderer::Vector(format) => {
-                warn_lost_settings(args, plan.format, reporter);
-                style::warn_contrast(args, &options, renderer, reporter);
+                warn_lost_settings(style, plan.format, reporter);
+                style::warn_contrast(style, &options, renderer, reporter);
                 render_vector(code.matrix(), format, &options)?
             }
             Renderer::Text => {
-                warn_unused_image_flags(args, reporter);
+                warn_unused_image_flags(style, reporter);
                 // Colour follows the stream the text ends up on.
                 let enabled = color.enabled(plan.is_stdout() && env.stdout_is_tty, env);
                 let text_format = plan.format.text_format(enabled).ok_or_else(|| {
@@ -112,9 +102,7 @@ impl Generate<'_, '_> {
                          if it looks reversed, add --invert",
                     );
                 }
-                let options = TextOptions::default()
-                    .with_margin(usize::from(args.margin))
-                    .with_invert(args.invert);
+                let options = text_options(style);
                 // Any text format wraps on a narrow terminal, and ASCII (two
                 // columns per module) is the widest of them.
                 if plan.is_stdout() && env.stdout_is_tty {
@@ -125,7 +113,7 @@ impl Generate<'_, '_> {
         };
 
         // Checked before anything is written, so a failing code never lands.
-        let mode = verify::Mode::select(args, renderer, style::is_styled(&options));
+        let mode = verify::Mode::select(style, renderer, style::is_styled(&options));
         let subject = Subject {
             matrix: code.matrix(),
             renderer,
@@ -149,9 +137,31 @@ impl Generate<'_, '_> {
     }
 }
 
+/// Warns when `--margin` is below the quiet zone the standard requires.
+pub(crate) fn warn_margin(args: &StyleArgs, reporter: &mut Reporter<'_>) {
+    if usize::from(args.margin) < DEFAULT_MARGIN {
+        reporter.warn(
+            "margin_below_quiet_zone",
+            &format!(
+                "a margin of {} is below the {DEFAULT_MARGIN}-module quiet zone \
+                 the standard requires; some scanners may fail",
+                args.margin
+            ),
+            Some("use --margin 4"),
+        );
+    }
+}
+
+/// The text renderer options selected by the flags.
+pub(crate) fn text_options(args: &StyleArgs) -> TextOptions {
+    TextOptions::default()
+        .with_margin(usize::from(args.margin))
+        .with_invert(args.invert)
+}
+
 /// Warns about image-only flags given with a text format, where they would
 /// otherwise be silently ignored.
-fn warn_unused_image_flags(args: &RenderArgs, reporter: &mut Reporter<'_>) {
+pub(crate) fn warn_unused_image_flags(args: &StyleArgs, reporter: &mut Reporter<'_>) {
     let unused: Vec<&str> = [
         (args.scale.is_some(), "--scale"),
         (args.size.is_some(), "--size"),
@@ -180,7 +190,11 @@ fn warn_unused_image_flags(args: &RenderArgs, reporter: &mut Reporter<'_>) {
 
 /// Warns about image settings `format` cannot keep: `--dpi` outside PNG
 /// and JPEG, and transparency in a JPEG.
-fn warn_lost_settings(args: &RenderArgs, format: OutputFormat, reporter: &mut Reporter<'_>) {
+pub(crate) fn warn_lost_settings(
+    args: &StyleArgs,
+    format: OutputFormat,
+    reporter: &mut Reporter<'_>,
+) {
     let raster = match format.renderer() {
         Renderer::Raster(raster) => Some(raster),
         Renderer::Vector(_) | Renderer::Text => None,
@@ -234,7 +248,7 @@ fn result(plan: &Plan, input: &Input, code: &QrCode, delivered: Delivered) -> Ge
 
 /// The encoder options selected by the flags (the error correction level
 /// is decided with the logo, see [`logo::ec_level`]).
-fn encode_options(args: &RenderArgs) -> EncodeOptions {
+pub(crate) fn encode_options(args: &StyleArgs) -> EncodeOptions {
     EncodeOptions::default()
         .with_mode(args.mode)
         .with_version(

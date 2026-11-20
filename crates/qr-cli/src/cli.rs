@@ -145,7 +145,6 @@ pub struct GenerateArgs {
 /// Options that control how a code is encoded, drawn and written. The
 /// default command and every payload subcommand share them.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
-#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
 pub struct RenderArgs {
     /// Write the code to PATH ('-' for stdout, not /dev/stdout). Existing
     /// files are replaced atomically and keep their permissions; a symlink
@@ -158,6 +157,31 @@ pub struct RenderArgs {
     #[arg(short = 'f', long = "format", value_enum, value_name = "FORMAT")]
     pub format: Option<OutputFormat>,
 
+    /// How the code is encoded and drawn.
+    #[command(flatten)]
+    pub style: StyleArgs,
+
+    /// Print the image as a base64 data: URI instead of raw bytes
+    /// [default format: svg]. With -o, the file holds the URI: use a .txt
+    /// name.
+    #[arg(long)]
+    pub data_uri: bool,
+
+    /// Fail instead of replacing an existing -o file.
+    #[arg(long, requires = "output")]
+    pub no_clobber: bool,
+
+    /// Print a JSON result object on stdout and JSON errors on stderr.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// How a code is encoded and drawn: error correction, version, mode and
+/// mask, then size, colours, shape, logo and the read-back check. Shared by
+/// [`RenderArgs`] (one code) and [`BatchArgs`] (one code per row).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent switch.
+pub struct StyleArgs {
     /// Error correction level: L, M, Q or H [default: M; H with --logo].
     #[arg(long = "ec", value_name = "LEVEL", value_parser = EcLevel::from_str)]
     pub ec_level: Option<EcLevel>,
@@ -254,20 +278,6 @@ pub struct RenderArgs {
     /// Skip the automatic read-back check.
     #[arg(long, overrides_with = "verify")]
     pub no_verify: bool,
-
-    /// Print the image as a base64 data: URI instead of raw bytes
-    /// [default format: svg]. With -o, the file holds the URI: use a .txt
-    /// name.
-    #[arg(long)]
-    pub data_uri: bool,
-
-    /// Fail instead of replacing an existing -o file.
-    #[arg(long, requires = "output")]
-    pub no_clobber: bool,
-
-    /// Print a JSON result object on stdout and JSON errors on stderr.
-    #[arg(long)]
-    pub json: bool,
 }
 
 const DECODE_AFTER_HELP: &str = "\
@@ -403,15 +413,18 @@ mod tests {
         assert_eq!(cli.generate.text.as_deref(), Some("x"));
         assert!(!cli.generate.keep_newline);
         assert_eq!(cli.generate.input, None);
-        let g = cli.render_args().clone();
+        let r = cli.render_args().clone();
+        assert_eq!((r.output, r.format), (None, None));
+        assert!(!(r.data_uri || r.no_clobber || r.json));
+        let g = r.style;
         assert_eq!(g.ec_level, None);
         assert_eq!((g.logo, g.logo_scale), (None, None));
         assert_eq!(g.mode, ModeChoice::Auto);
         assert_eq!(g.margin, 4);
-        assert_eq!((g.qr_version, g.mask, g.format), (None, None, None));
-        assert_eq!((g.output, g.scale, g.fg, g.bg), (None, None, None, None));
+        assert_eq!((g.qr_version, g.mask), (None, None));
+        assert_eq!((g.scale, g.fg, g.bg), (None, None, None));
         assert_eq!((g.size, g.dpi), (None, None));
-        assert!(!(g.transparent || g.invert || g.data_uri || g.no_clobber || g.json));
+        assert!(!(g.transparent || g.invert));
         assert_eq!(g.shape, Shape::Square);
         assert!(!(g.verify || g.no_verify));
         assert_eq!(cli.global.color, ColorChoice::Auto);
@@ -446,7 +459,7 @@ mod tests {
             Some(std::path::Path::new("w.png"))
         );
         assert_eq!(
-            (render.shape, render.ec_level),
+            (render.style.shape, render.style.ec_level),
             (Shape::Dots, Some(EcLevel::H))
         );
         assert!(!wifi.output.print_payload);
@@ -552,9 +565,9 @@ mod tests {
         let g = cli.generate.render;
         assert_eq!(g.output.as_deref(), Some(std::path::Path::new("a.svg")));
         assert_eq!(g.format, Some(OutputFormat::Jpeg));
-        assert_eq!(g.scale, Some(3));
-        assert_eq!(g.fg, Some(Color::rgb(0, 0, 0x80)));
-        assert_eq!(g.bg, Some(Color::rgba(255, 255, 255, 0x88)));
+        assert_eq!(g.style.scale, Some(3));
+        assert_eq!(g.style.fg, Some(Color::rgb(0, 0, 0x80)));
+        assert_eq!(g.style.bg, Some(Color::rgba(255, 255, 255, 0x88)));
         assert!(g.no_clobber);
     }
 
@@ -562,7 +575,10 @@ mod tests {
     fn size_and_dpi_parse_and_size_conflicts_with_scale() {
         let cli = Cli::try_parse_from(["qr", "--size", "512", "--dpi", "300", "x"]).unwrap();
         assert_eq!(
-            (cli.generate.render.size, cli.generate.render.dpi),
+            (
+                cli.generate.render.style.size,
+                cli.generate.render.style.dpi
+            ),
             (Some(512), Some(300))
         );
         let err = Cli::try_parse_from(["qr", "--size", "512", "--scale", "4", "x"]).unwrap_err();
@@ -571,7 +587,7 @@ mod tests {
 
     #[test]
     fn shape_and_verify_flags_parse() {
-        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().generate.render;
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().generate.render.style;
         let g = parse(&["qr", "--shape", "dots", "x"]);
         assert_eq!(g.shape, Shape::Dots);
         assert_eq!(ModuleShape::from(g.shape), ModuleShape::Dots);
@@ -590,7 +606,7 @@ mod tests {
     fn logo_flags_parse() {
         let cli =
             Cli::try_parse_from(["qr", "--logo", "l.png", "--logo-scale", "0.3", "x"]).unwrap();
-        let g = cli.generate.render;
+        let g = cli.generate.render.style;
         assert_eq!(g.logo.as_deref(), Some(std::path::Path::new("l.png")));
         assert_eq!(g.logo_scale, Some(LogoScale::MAX));
         // The scale needs a logo and a value in range.
